@@ -30,6 +30,7 @@ import org.apache.spark.sql.catalyst.util.{toPrettySQL, CharVarcharUtils}
 import org.apache.spark.sql.execution.aggregate.TypedAggregateExpression
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions.lit
+import org.apache.spark.sql.internal.TypedAggUtils
 import org.apache.spark.sql.types._
 
 private[sql] object Column {
@@ -81,17 +82,7 @@ class TypedColumn[-T, U](
   private[sql] def withInputType(
       inputEncoder: ExpressionEncoder[_],
       inputAttributes: Seq[Attribute]): TypedColumn[T, U] = {
-    val unresolvedDeserializer = UnresolvedDeserializer(inputEncoder.deserializer, inputAttributes)
-
-    // This only inserts inputs into typed aggregate expressions. For untyped aggregate expressions,
-    // the resolving is handled in the analyzer directly.
-    val newExpr = expr transform {
-      case ta: TypedAggregateExpression if ta.inputDeserializer.isEmpty =>
-        ta.withInputInfo(
-          deser = unresolvedDeserializer,
-          cls = inputEncoder.clsTag.runtimeClass,
-          schema = inputEncoder.schema)
-    }
+    val newExpr = TypedAggUtils.withInputType(expr, inputEncoder, inputAttributes)
     new TypedColumn[T, U](newExpr, encoder)
   }
 
@@ -847,6 +838,14 @@ class Column(val expr: Expression) extends Logging {
   def rlike(literal: String): Column = withExpr { RLike(expr, lit(literal).expr) }
 
   /**
+   * SQL ILIKE expression (case insensitive LIKE).
+   *
+   * @group expr_ops
+   * @since 3.3.0
+   */
+  def ilike(literal: String): Column = withExpr { new ILike(expr, lit(literal).expr) }
+
+  /**
    * An expression that gets an item at position `ordinal` out of an array,
    * or gets a value by key `key` in a `MapType`.
    *
@@ -932,7 +931,7 @@ class Column(val expr: Expression) extends Logging {
    *
    *   val df = sql("SELECT named_struct('a', 1, 'b', 2) struct_col")
    *   df.select($"struct_col".dropFields("a", "b"))
-   *   // result: org.apache.spark.sql.AnalysisException: cannot resolve 'update_fields(update_fields(`struct_col`))' due to data type mismatch: cannot drop all fields in struct
+   *   // result: org.apache.spark.sql.AnalysisException: [DATATYPE_MISMATCH.CANNOT_DROP_ALL_FIELDS] Cannot resolve "update_fields(struct_col, dropfield(), dropfield())" due to data type mismatch: Cannot drop all fields in struct.;
    *
    *   val df = sql("SELECT CAST(NULL AS struct<a:int,b:int>) struct_col")
    *   df.select($"struct_col".dropFields("b"))

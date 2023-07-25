@@ -62,6 +62,8 @@ case class ResolvedHint(child: LogicalPlan, hints: HintInfo = HintInfo())
  */
 case class JoinHint(leftHint: Option[HintInfo], rightHint: Option[HintInfo]) {
 
+  def isEmpty: Boolean = leftHint.isEmpty && rightHint.isEmpty
+
   override def toString: String = {
     Seq(
       leftHint.map("leftHint=" + _),
@@ -182,6 +184,16 @@ case object NO_BROADCAST_HASH extends JoinStrategyHint {
  */
 case object PREFER_SHUFFLE_HASH extends JoinStrategyHint {
   override def displayName: String = "prefer_shuffle_hash"
+  override def hintAliases: Set[String] = Set.empty
+}
+
+/**
+ * An internal hint to prohibit broadcasting and replicating one side of a join. This hint is used
+ * by some rules where broadcasting or replicating a particular side of the join is not permitted,
+ * such as the cardinality check in MERGE operations.
+ */
+case object NO_BROADCAST_AND_REPLICATION extends JoinStrategyHint {
+  override def displayName: String = "no_broadcast_and_replication"
   override def hintAliases: Set[String] = Set.empty
 }
 

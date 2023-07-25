@@ -17,7 +17,6 @@
 
 package org.apache.spark.sql.catalyst.optimizer
 
-import scala.collection.immutable.HashSet
 import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.sql.catalyst.expressions._
@@ -25,6 +24,7 @@ import org.apache.spark.sql.catalyst.expressions.Literal.FalseLiteral
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.trees.TreePattern.{BINARY_COMPARISON, IN, INSET}
+import org.apache.spark.sql.catalyst.types.{DataTypeUtils, PhysicalDataType}
 import org.apache.spark.sql.types._
 
 /**
@@ -41,7 +41,7 @@ import org.apache.spark.sql.types._
  *
  * Currently this only handles cases where:
  *   1). `fromType` (of `fromExp`) and `toType` are of numeric types (i.e., short, int, float,
- *     decimal, etc) or boolean type
+ *     decimal, etc), boolean type or datetime type
  *   2). `fromType` can be safely coerced to `toType` without precision loss (e.g., short to int,
  *     int to long, but not long to int, nor int to boolean)
  *
@@ -105,16 +105,15 @@ object UnwrapCastInBinaryComparison extends Rule[LogicalPlan] {
     case l: LogicalPlan =>
       l.transformExpressionsUpWithPruning(
         _.containsAnyPattern(BINARY_COMPARISON, IN, INSET), ruleId) {
-        case e @ (BinaryComparison(_, _) | In(_, _) | InSet(_, _)) => unwrapCast(e)
+        case e @ (BinaryComparison(_, _) | In(_, _) | InSet(_, _)) => unwrapCast(e).getOrElse(e)
       }
   }
 
-  private def unwrapCast(exp: Expression): Expression = exp match {
+  private def unwrapCast(exp: Expression): Option[Expression] = exp match {
     // Not a canonical form. In this case we first canonicalize the expression by swapping the
     // literal and cast side, then process the result and swap the literal and cast again to
     // restore the original order.
-    case BinaryComparison(Literal(_, literalType), Cast(fromExp, toType, _, _))
-        if canImplicitlyCast(fromExp, toType, literalType) =>
+    case BinaryComparison(_: Literal, _: Cast) =>
       def swap(e: Expression): Expression = e match {
         case GreaterThan(left, right) => LessThan(right, left)
         case GreaterThanOrEqual(left, right) => LessThanOrEqual(right, left)
@@ -125,14 +124,19 @@ object UnwrapCastInBinaryComparison extends Rule[LogicalPlan] {
         case _ => e
       }
 
-      swap(unwrapCast(swap(exp)))
+      unwrapCast(swap(exp)).map(swap)
 
     // In case both sides have numeric type, optimize the comparison by removing casts or
     // moving cast to the literal side.
     case be @ BinaryComparison(
       Cast(fromExp, toType: NumericType, _, _), Literal(value, literalType))
-        if canImplicitlyCast(fromExp, toType, literalType) =>
-      simplifyNumericComparison(be, fromExp, toType, value)
+        if canImplicitlyCast(fromExp, toType, literalType) && value != null =>
+      Some(simplifyNumericComparison(be, fromExp, toType, value))
+
+    case be @ BinaryComparison(
+      Cast(fromExp, _, timeZoneId, evalMode), date @ Literal(value, DateType))
+        if AnyTimestampType.acceptsType(fromExp.dataType) && value != null =>
+      Some(unwrapDateToTimestamp(be, fromExp, date, timeZoneId, evalMode))
 
     // As the analyzer makes sure that the list of In is already of the same data type, then the
     // rule can simply check the first literal in `in.list` can implicitly cast to `toType` or not,
@@ -142,85 +146,33 @@ object UnwrapCastInBinaryComparison extends Rule[LogicalPlan] {
     // 2. this rule only handles the case when both `fromExp` and value in `in.list` are of numeric
     // type.
     // 3. this rule doesn't optimize In when `in.list` contains an expression that is not literal.
-    case in @ In(Cast(fromExp, toType: NumericType, _, _), list @ Seq(firstLit, _*))
+    case in @ In(Cast(fromExp, toType: NumericType, tz, mode), list @ Seq(firstLit, _*))
       if canImplicitlyCast(fromExp, toType, firstLit.dataType) && in.inSetConvertible =>
 
-      // There are 3 kinds of literals in the list:
-      // 1. null literals
-      // 2. The literals that can cast to fromExp.dataType
-      // 3. The literals that cannot cast to fromExp.dataType
-      // null literals is special as we can cast null literals to any data type.
-      val (nullList, canCastList, cannotCastList) =
-        (ArrayBuffer[Literal](), ArrayBuffer[Literal](), ArrayBuffer[Expression]())
-      list.foreach {
-        case lit @ Literal(null, _) => nullList += lit
-        case lit @ NonNullLiteral(_, _) =>
-          unwrapCast(EqualTo(in.value, lit)) match {
-            case EqualTo(_, unwrapLit: Literal) => canCastList += unwrapLit
-            case e @ And(IsNull(_), Literal(null, BooleanType)) => cannotCastList += e
-            case _ => throw new IllegalStateException("Illegal unwrap cast result found.")
-          }
-        case _ => throw new IllegalStateException("Illegal value found in in.list.")
+      val buildIn = {
+        (nullList: ArrayBuffer[Literal], canCastList: ArrayBuffer[Literal]) =>
+          // cast null value to fromExp.dataType, to make sure the new return list is in the same
+          // data type.
+          val newList = nullList.map(lit => Cast(lit, fromExp.dataType, tz, mode)) ++ canCastList
+          In(fromExp, newList.toSeq)
       }
-
-      // return original expression when in.list contains only null values.
-      if (canCastList.isEmpty && cannotCastList.isEmpty) {
-        exp
-      } else {
-        // cast null value to fromExp.dataType, to make sure the new return list is in the same data
-        // type.
-        val newList = nullList.map(lit => Cast(lit, fromExp.dataType)) ++ canCastList
-        val unwrapIn = In(fromExp, newList.toSeq)
-        cannotCastList.headOption match {
-          case None => unwrapIn
-          // since `cannotCastList` are all the same,
-          // convert to a single value `And(IsNull(_), Literal(null, BooleanType))`.
-          case Some(falseIfNotNull @ And(IsNull(_), Literal(null, BooleanType)))
-              if cannotCastList.map(_.canonicalized).distinct.length == 1 =>
-            Or(falseIfNotNull, unwrapIn)
-          case _ => exp
-        }
-      }
+      simplifyIn(fromExp, toType, list, buildIn)
 
     // The same with `In` expression, the analyzer makes sure that the hset of InSet is already of
     // the same data type, so simply check `fromExp.dataType` can implicitly cast to `toType` and
     // both `fromExp.dataType` and `toType` is numeric type or not.
-    case inSet @ InSet(Cast(fromExp, toType: NumericType, _, _), hset)
+    case InSet(Cast(fromExp, toType: NumericType, _, _), hset)
       if hset.nonEmpty && canImplicitlyCast(fromExp, toType, toType) =>
+      val buildInSet =
+        (nullList: ArrayBuffer[Literal], canCastList: ArrayBuffer[Literal]) =>
+          InSet(fromExp, (nullList ++ canCastList).map(_.value).toSet)
+      simplifyIn(
+        fromExp,
+        toType,
+        hset.map(v => Literal.create(v, toType)).toSeq,
+        buildInSet)
 
-      // The same with `In`, there are 3 kinds of literals in the hset:
-      // 1. null literals
-      // 2. The literals that can cast to fromExp.dataType
-      // 3. The literals that cannot cast to fromExp.dataType
-      var (nullSet, canCastSet, cannotCastSet) =
-        (HashSet[Any](), HashSet[Any](), HashSet[Expression]())
-      hset.map(value => Literal.create(value, toType))
-        .foreach {
-          case lit @ Literal(null, _) => nullSet += lit.value
-          case lit @ NonNullLiteral(_, _) =>
-            unwrapCast(EqualTo(inSet.child, lit)) match {
-              case EqualTo(_, unwrapLit: Literal) => canCastSet += unwrapLit.value
-              case e @ And(IsNull(_), Literal(null, BooleanType)) => cannotCastSet += e
-              case _ => throw new IllegalStateException("Illegal unwrap cast result found.")
-            }
-          case _ => throw new IllegalStateException("Illegal value found in hset.")
-        }
-
-      if (canCastSet.isEmpty && cannotCastSet.isEmpty) {
-        exp
-      } else {
-        val unwrapInSet = InSet(fromExp, nullSet ++ canCastSet)
-        cannotCastSet.headOption match {
-          case None => unwrapInSet
-          // since `cannotCastList` are all the same,
-          // convert to a single value `And(IsNull(_), Literal(null, BooleanType))`.
-          case Some(falseIfNotNull @ And(IsNull(_), Literal(null, BooleanType)))
-            if cannotCastSet.map(_.canonicalized).size == 1 => Or(falseIfNotNull, unwrapInSet)
-          case _ => exp
-        }
-      }
-
-    case _ => exp
+    case _ => None
   }
 
   /**
@@ -236,7 +188,7 @@ object UnwrapCastInBinaryComparison extends Rule[LogicalPlan] {
       value: Any): Expression = {
 
     val fromType = fromExp.dataType
-    val ordering = toType.ordering.asInstanceOf[Ordering[Any]]
+    val ordering = PhysicalDataType.ordering(toType)
     val range = getRange(fromType)
 
     if (range.isDefined) {
@@ -306,7 +258,7 @@ object UnwrapCastInBinaryComparison extends Rule[LogicalPlan] {
     // decimal type), or that the literal `value` is within range `(min, max)`. For these, we
     // optimize by moving the cast to the literal side.
 
-    val newValue = Cast(Literal(value), fromType).eval()
+    val newValue = Cast(Literal(value), fromType, ansiEnabled = false).eval()
     if (newValue == null) {
       // This means the cast failed, for instance, due to the value is not representable in the
       // narrower type. In this case we simply return the original expression.
@@ -347,6 +299,83 @@ object UnwrapCastInBinaryComparison extends Rule[LogicalPlan] {
   }
 
   /**
+   * Move the cast to the literal side, because we can only get the minimum value of timestamp,
+   * so some BinaryComparison needs to be changed,
+   * such as CAST(ts AS date) > DATE '2023-01-01' ===> ts >= TIMESTAMP '2023-01-02 00:00:00'
+   */
+  private def unwrapDateToTimestamp(
+      exp: BinaryComparison,
+      fromExp: Expression,
+      date: Literal,
+      tz: Option[String],
+      evalMode: EvalMode.Value): Expression = {
+    val dateAddOne = DateAdd(date, Literal(1, IntegerType))
+    exp match {
+      case _: GreaterThan =>
+        GreaterThanOrEqual(fromExp, Cast(dateAddOne, fromExp.dataType, tz, evalMode))
+      case _: GreaterThanOrEqual =>
+        GreaterThanOrEqual(fromExp, Cast(date, fromExp.dataType, tz, evalMode))
+      case _: EqualTo =>
+        And(GreaterThanOrEqual(fromExp, Cast(date, fromExp.dataType, tz, evalMode)),
+          LessThan(fromExp, Cast(dateAddOne, fromExp.dataType, tz, evalMode)))
+      case EqualNullSafe(left, _) if !left.nullable =>
+        And(GreaterThanOrEqual(fromExp, Cast(date, fromExp.dataType, tz, evalMode)),
+          LessThan(fromExp, Cast(dateAddOne, fromExp.dataType, tz, evalMode)))
+      case _: LessThan =>
+        LessThan(fromExp, Cast(date, fromExp.dataType, tz, evalMode))
+      case _: LessThanOrEqual =>
+        LessThan(fromExp, Cast(dateAddOne, fromExp.dataType, tz, evalMode))
+      case _ => exp
+    }
+  }
+
+  private def simplifyIn[IN <: Expression](
+      fromExp: Expression,
+      toType: NumericType,
+      list: Seq[Expression],
+      buildExpr: (ArrayBuffer[Literal], ArrayBuffer[Literal]) => IN): Option[Expression] = {
+
+    // There are 3 kinds of literals in the list:
+    // 1. null literals
+    // 2. The literals that can cast to fromExp.dataType
+    // 3. The literals that cannot cast to fromExp.dataType
+    // Note that:
+    // - null literals are special as we can cast null literals to any data type
+    // - for 3, we have three cases
+    //   1). the literal cannot cast to fromExp.dataType, and there is no min/max for the fromType,
+    //     for instance:
+    //         `cast(input[2, decimal(5,2), true] as decimal(10,4)) = 123456.1234`
+    //   2). the literal value is out of fromType range, for instance:
+    //         `cast(input[0, smallint, true] as bigint) = 2147483647`
+    //   3). the literal value is rounded up/down after casting to `fromType`, for instance:
+    //         `cast(input[1, float, true] as double) = 3.14`
+    //     note that 3.14 will be rounded to 3.14000010... after casting to float
+
+    val (nullList, canCastList) = (ArrayBuffer[Literal](), ArrayBuffer[Literal]())
+    val fromType = fromExp.dataType
+    val ordering = PhysicalDataType.ordering(toType)
+
+    list.foreach {
+      case lit @ Literal(null, _) => nullList += lit
+      case NonNullLiteral(value, _) =>
+        val newValue = Cast(Literal(value), fromType, ansiEnabled = false).eval()
+        val valueRoundTrip = Cast(Literal(newValue, fromType), toType).eval()
+        if (newValue != null && ordering.compare(value, valueRoundTrip) == 0) {
+          canCastList += Literal(newValue, fromType)
+        }
+    }
+
+    if (nullList.isEmpty && canCastList.isEmpty) {
+      // only have cannot cast to fromExp.dataType literals
+      Option(falseIfNotNull(fromExp))
+    } else {
+      val unwrapExpr = buildExpr(nullList, canCastList)
+      Option(unwrapExpr)
+    }
+  }
+
+
+  /**
    * Check if the input `fromExp` can be safely cast to `toType` without any loss of precision,
    * i.e., the conversion is injective. Note this only handles the case when both sides are of
    * numeric type.
@@ -355,11 +384,21 @@ object UnwrapCastInBinaryComparison extends Rule[LogicalPlan] {
       fromExp: Expression,
       toType: DataType,
       literalType: DataType): Boolean = {
-    toType.sameType(literalType) &&
+    DataTypeUtils.sameType(toType, literalType) &&
       !fromExp.foldable &&
       toType.isInstanceOf[NumericType] &&
-      ((fromExp.dataType.isInstanceOf[NumericType] && Cast.canUpCast(fromExp.dataType, toType)) ||
-        fromExp.dataType.isInstanceOf[BooleanType])
+      canUnwrapCast(fromExp.dataType, toType)
+  }
+
+  private def canUnwrapCast(from: DataType, to: DataType): Boolean = (from, to) match {
+    case (BooleanType, _) => true
+    // SPARK-39476: It's not safe to unwrap cast from Integer to Float or from Long to Float/Double,
+    // since the length of Integer/Long may exceed the significant digits of Float/Double.
+    case (IntegerType, FloatType) => false
+    case (LongType, FloatType) => false
+    case (LongType, DoubleType) => false
+    case _ if from.isInstanceOf[NumericType] => Cast.canUpCast(from, to)
+    case _ => false
   }
 
   private[optimizer] def getRange(dt: DataType): Option[(Any, Any)] = dt match {

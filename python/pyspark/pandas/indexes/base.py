@@ -16,12 +16,23 @@
 #
 
 from functools import partial
-from typing import Any, Callable, Iterator, List, Optional, Tuple, Union, cast, no_type_check
+from typing import (
+    Any,
+    Callable,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+    no_type_check,
+    TYPE_CHECKING,
+)
 import warnings
 
 import pandas as pd
 import numpy as np
-from pandas.api.types import (
+from pandas.api.types import (  # type: ignore[attr-defined]
     is_list_like,
     is_interval_dtype,
     is_bool_dtype,
@@ -33,11 +44,18 @@ from pandas.api.types import (
 )
 from pandas.core.accessor import CachedAccessor
 from pandas.io.formats.printing import pprint_thing
-from pandas.api.types import CategoricalDtype, is_hashable
+from pandas.api.types import CategoricalDtype, is_hashable  # type: ignore[attr-defined]
 from pandas._libs import lib
 
-from pyspark.sql import functions as F, Column
-from pyspark.sql.types import FractionalType, IntegralType, TimestampType
+from pyspark.sql.column import Column
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    DayTimeIntervalType,
+    FractionalType,
+    IntegralType,
+    TimestampType,
+    TimestampNTZType,
+)
 
 from pyspark import pandas as ps  # For running doctests and reference resolution in PyCharm.
 from pyspark.pandas._typing import Dtype, Label, Name, Scalar
@@ -46,7 +64,6 @@ from pyspark.pandas.base import IndexOpsMixin
 from pyspark.pandas.frame import DataFrame
 from pyspark.pandas.missing.indexes import MissingPandasLikeIndex
 from pyspark.pandas.series import Series, first_series
-from pyspark.pandas.spark import functions as SF
 from pyspark.pandas.spark.accessors import SparkIndexMethods
 from pyspark.pandas.utils import (
     is_name_like_tuple,
@@ -56,7 +73,9 @@ from pyspark.pandas.utils import (
     scol_for,
     verify_temp_column_name,
     validate_bool_kwarg,
+    validate_index_loc,
     ERROR_MESSAGE_CANNOT_COMBINE,
+    log_advice,
 )
 from pyspark.pandas.internal import (
     InternalField,
@@ -65,6 +84,9 @@ from pyspark.pandas.internal import (
     SPARK_DEFAULT_INDEX_NAME,
     SPARK_INDEX_NAME_FORMAT,
 )
+
+if TYPE_CHECKING:
+    from pyspark.pandas.spark.accessors import SparkIndexOpsMethods
 
 
 class Index(IndexOpsMixin):
@@ -95,13 +117,13 @@ class Index(IndexOpsMixin):
 
     Examples
     --------
-    >>> ps.DataFrame({'a': ['a', 'b', 'c']}, index=[1, 2, 3]).index
+    >>> ps.DataFrame({'a': ['a', 'b', 'c']}, index=[1, 2, 3]).index  # doctest: +SKIP
     Int64Index([1, 2, 3], dtype='int64')
 
-    >>> ps.DataFrame({'a': [1, 2, 3]}, index=list('abc')).index
+    >>> ps.DataFrame({'a': [1, 2, 3]}, index=list('abc')).index  # doctest: +SKIP
     Index(['a', 'b', 'c'], dtype='object')
 
-    >>> ps.Index([1, 2, 3])
+    >>> ps.Index([1, 2, 3])  # doctest: +SKIP
     Int64Index([1, 2, 3], dtype='int64')
 
     >>> ps.Index(list('abc'))
@@ -110,13 +132,13 @@ class Index(IndexOpsMixin):
     From a Series:
 
     >>> s = ps.Series([1, 2, 3], index=[10, 20, 30])
-    >>> ps.Index(s)
+    >>> ps.Index(s)  # doctest: +SKIP
     Int64Index([1, 2, 3], dtype='int64')
 
     From an Index:
 
     >>> idx = ps.Index([1, 2, 3])
-    >>> ps.Index(idx)
+    >>> ps.Index(idx)  # doctest: +SKIP
     Int64Index([1, 2, 3], dtype='int64')
     """
 
@@ -127,7 +149,7 @@ class Index(IndexOpsMixin):
         copy: bool = False,
         name: Optional[Name] = None,
         tupleize_cols: bool = True,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> "Index":
         if not is_hashable(name):
             raise TypeError("Index.name must be a hashable type")
@@ -166,7 +188,7 @@ class Index(IndexOpsMixin):
                     copy=copy,
                     name=name,
                     tupleize_cols=tupleize_cols,
-                    **kwargs
+                    **kwargs,
                 )
             ),
         )
@@ -177,7 +199,9 @@ class Index(IndexOpsMixin):
         from pyspark.pandas.indexes.datetimes import DatetimeIndex
         from pyspark.pandas.indexes.multi import MultiIndex
         from pyspark.pandas.indexes.numeric import Float64Index, Int64Index
+        from pyspark.pandas.indexes.timedelta import TimedeltaIndex
 
+        instance: Index
         if anchor._internal.index_level > 1:
             instance = object.__new__(MultiIndex)
         elif isinstance(anchor._internal.index_fields[0].dtype, CategoricalDtype):
@@ -191,13 +215,19 @@ class Index(IndexOpsMixin):
         ):
             instance = object.__new__(Float64Index)
         elif isinstance(
-            anchor._internal.spark_type_for(anchor._internal.index_spark_columns[0]), TimestampType
+            anchor._internal.spark_type_for(anchor._internal.index_spark_columns[0]),
+            (TimestampType, TimestampNTZType),
         ):
             instance = object.__new__(DatetimeIndex)
+        elif isinstance(
+            anchor._internal.spark_type_for(anchor._internal.index_spark_columns[0]),
+            DayTimeIntervalType,
+        ):
+            instance = object.__new__(TimedeltaIndex)
         else:
             instance = object.__new__(Index)
 
-        instance._anchor = anchor
+        instance._anchor = anchor  # type: ignore[attr-defined]
         return instance
 
     @property
@@ -238,7 +268,9 @@ class Index(IndexOpsMixin):
         )
         return DataFrame(internal).index
 
-    spark = CachedAccessor("spark", SparkIndexMethods)
+    spark: "SparkIndexOpsMethods" = CachedAccessor(  # type: ignore[assignment]
+        "spark", SparkIndexMethods
+    )
 
     # This method is used via `DataFrame.info` API internally.
     def _summary(self, name: Optional[str] = None) -> str:
@@ -255,12 +287,11 @@ class Index(IndexOpsMixin):
         String with a summarized representation of the index
         """
         head, tail, total_count = tuple(
-            cast(
-                pd.DataFrame,
-                self._internal.spark_frame.select(
-                    F.first(self.spark.column), F.last(self.spark.column), F.count(F.expr("*"))
-                ).toPandas(),
-            ).iloc[0]
+            self._internal.spark_frame.select(
+                F.first(self.spark.column), F.last(self.spark.column), F.count(F.expr("*"))
+            )
+            .toPandas()
+            .iloc[0]
         )
 
         if total_count > 0:
@@ -421,7 +452,7 @@ class Index(IndexOpsMixin):
                 with option_context("compute.default_index_type", "distributed-sequence"):
                     # Directly using Series from both self and other seems causing
                     # some exceptions when 'compute.ops_on_diff_frames' is enabled.
-                    # Working around for now via using frame.
+                    # Working around for now via using frames.
                     return (
                         cast(Series, self.to_series("self").reset_index(drop=True))
                         == cast(Series, other.to_series("other").reset_index(drop=True))
@@ -486,6 +517,16 @@ class Index(IndexOpsMixin):
         >>> df['dogs'].index.to_pandas()
         Index(['a', 'b', 'c', 'd'], dtype='object')
         """
+        log_advice(
+            "`to_pandas` loads all data into the driver's memory. "
+            "It should only be used if the resulting pandas Index is expected to be small."
+        )
+        return self._to_pandas()
+
+    def _to_pandas(self) -> pd.Index:
+        """
+        Same as `to_pandas()`, without issuing the advice log for internal usage.
+        """
         return self._to_internal_pandas().copy()
 
     def to_numpy(self, dtype: Optional[Union[str, Dtype]] = None, copy: bool = False) -> np.ndarray:
@@ -500,9 +541,9 @@ class Index(IndexOpsMixin):
         dtype : str or numpy.dtype, optional
             The dtype to pass to :meth:`numpy.asarray`
         copy : bool, default False
-            Whether to ensure that the returned value is a not a view on
+            Whether to ensure that the returned value is not a view on
             another array. Note that ``copy=False`` does not *ensure* that
-            ``to_numpy()`` is no-copy. Rather, ``copy=True`` ensure that
+            ``to_numpy()`` is no-copy. Rather, ``copy=True`` ensures that
             a copy is made, even if not strictly necessary.
 
         Returns
@@ -516,7 +557,13 @@ class Index(IndexOpsMixin):
         >>> ps.DataFrame({'a': ['a', 'b', 'c']}, index=[[1, 2, 3], [4, 5, 6]]).index.to_numpy()
         array([(1, 4), (2, 5), (3, 6)], dtype=object)
         """
-        result = np.asarray(self._to_internal_pandas()._values, dtype=dtype)
+        log_advice(
+            "`to_numpy` loads all data into the driver's memory. "
+            "It should only be used if the resulting NumPy ndarray is expected to be small."
+        )
+        result = np.asarray(
+            self._to_internal_pandas()._values, dtype=dtype  # type: ignore[arg-type,attr-defined]
+        )
         if copy:
             result = result.copy()
         return result
@@ -599,6 +646,8 @@ class Index(IndexOpsMixin):
         .. note:: This method should only be used if the resulting NumPy ndarray is expected
             to be small, as all the data is loaded into the driver's memory.
 
+        .. deprecated:: 3.4.0
+
         Returns
         -------
         numpy.ndarray
@@ -614,10 +663,13 @@ class Index(IndexOpsMixin):
         >>> ps.Index(['a', 'b', 'c']).asi8 is None
         True
         """
-        warnings.warn("We recommend using `{}.to_numpy()` instead.".format(type(self).__name__))
+        warnings.warn(
+            "Index.asi8 is deprecated and will be removed in 4.0.0. " "Use Index.astype instead.",
+            FutureWarning,
+        )
         if isinstance(self.spark.data_type, IntegralType):
             return self.to_numpy()
-        elif isinstance(self.spark.data_type, TimestampType):
+        elif isinstance(self.spark.data_type, (TimestampType, TimestampNTZType)):
             return np.array(list(map(lambda x: x.astype(np.int64), self.to_numpy())))
         else:
             return None
@@ -731,7 +783,7 @@ class Index(IndexOpsMixin):
     def rename(self, name: Union[Name, List[Name]], inplace: bool = False) -> Optional["Index"]:
         """
         Alter Index or MultiIndex name.
-        Able to set new names without level. Defaults to returning new index.
+        Able to set new names without level. Defaults to returning a new index.
 
         Parameters
         ----------
@@ -748,7 +800,7 @@ class Index(IndexOpsMixin):
         Examples
         --------
         >>> df = ps.DataFrame({'a': ['A', 'C'], 'b': ['A', 'B']}, columns=['a', 'b'])
-        >>> df.index.rename("c")
+        >>> df.index.rename("c")  # doctest: +SKIP
         Int64Index([0, 1], dtype='int64', name='c')
 
         >>> df.set_index("a", inplace=True)
@@ -817,10 +869,10 @@ class Index(IndexOpsMixin):
         Examples
         --------
         >>> idx = ps.Index([1, 2, None])
-        >>> idx
+        >>> idx  # doctest: +SKIP
         Float64Index([1.0, 2.0, nan], dtype='float64')
 
-        >>> idx.fillna(0)
+        >>> idx.fillna(0)  # doctest: +SKIP
         Float64Index([1.0, 2.0, 0.0], dtype='float64')
         """
         if not isinstance(value, (float, int, str, bool)):
@@ -836,10 +888,17 @@ class Index(IndexOpsMixin):
         )
         return DataFrame(internal).index
 
-    # TODO: ADD keep parameter
-    def drop_duplicates(self) -> "Index":
+    def drop_duplicates(self, keep: Union[bool, str] = "first") -> "Index":
         """
         Return Index with duplicate values removed.
+
+        Parameters
+        ----------
+        keep : {'first', 'last', ``False``}, default 'first'
+            Method to handle dropping duplicates:
+            - 'first' : Drop duplicates except for the first occurrence.
+            - 'last' : Drop duplicates except for the last occurrence.
+            - ``False`` : Drop all duplicates.
 
         Returns
         -------
@@ -852,25 +911,19 @@ class Index(IndexOpsMixin):
 
         Examples
         --------
-        Generate an pandas.Index with duplicate values.
+        Generate an Index with duplicate values.
 
         >>> idx = ps.Index(['lama', 'cow', 'lama', 'beetle', 'lama', 'hippo'])
 
         >>> idx.drop_duplicates().sort_values()
         Index(['beetle', 'cow', 'hippo', 'lama'], dtype='object')
         """
-        sdf = self._internal.spark_frame.select(
-            self._internal.index_spark_columns
-        ).drop_duplicates()
-        internal = InternalFrame(
-            spark_frame=sdf,
-            index_spark_columns=[
-                scol_for(sdf, col) for col in self._internal.index_spark_column_names
-            ],
-            index_names=self._internal.index_names,
-            index_fields=self._internal.index_fields,
-        )
-        return DataFrame(internal).index
+        with ps.option_context("compute.default_index_type", "distributed"):
+            # The attached index caused by `reset_index` below is used for sorting only,
+            # and it will be dropped soon,
+            # so we enforce “distributed” default index type
+            psser = self.to_series().reset_index(drop=True)
+        return Index(psser.drop_duplicates(keep=keep).sort_index())
 
     def to_series(self, name: Optional[Name] = None) -> Series:
         """
@@ -908,9 +961,7 @@ class Index(IndexOpsMixin):
             field = field.copy(name=name_like_string(name))
         elif self._internal.index_level == 1:
             name = self.name
-        column_labels = [
-            name if is_name_like_tuple(name) else (name,)
-        ]  # type: List[Optional[Label]]
+        column_labels: List[Optional[Label]] = [name if is_name_like_tuple(name) else (name,)]
         internal = self._internal.copy(
             column_labels=column_labels,
             data_spark_columns=[scol],
@@ -1037,7 +1088,7 @@ class Index(IndexOpsMixin):
 
     def is_integer(self) -> bool:
         """
-        Return if the current index type is a integer type.
+        Return if the current index type is an integer type.
 
         Examples
         --------
@@ -1070,7 +1121,7 @@ class Index(IndexOpsMixin):
 
     def is_object(self) -> bool:
         """
-        Return if the current index type is a object type.
+        Return if the current index type is an object type.
 
         Examples
         --------
@@ -1082,6 +1133,8 @@ class Index(IndexOpsMixin):
     def is_type_compatible(self, kind: str) -> bool:
         """
         Whether the index type is compatible with the provided type.
+
+        .. deprecated:: 3.4.0
 
         Examples
         --------
@@ -1095,11 +1148,26 @@ class Index(IndexOpsMixin):
         >>> psidx.is_type_compatible('floating')
         True
         """
+        warnings.warn(
+            "Index.is_type_compatible is deprecated and will be removed in 4.0.0. "
+            "Use Index.isin instead.",
+            FutureWarning,
+        )
         return kind == self.inferred_type
 
-    def dropna(self) -> "Index":
+    def dropna(self, how: str = "any") -> "Index":
         """
         Return Index or MultiIndex without NA/NaN values
+
+        Parameters
+        ----------
+        how : {'any', 'all'}, default 'any'
+            If the Index is a MultiIndex, drop the value when any or all levels
+            are NaN.
+
+        Returns
+        -------
+        Index or MultiIndex
 
         Examples
         --------
@@ -1107,46 +1175,41 @@ class Index(IndexOpsMixin):
         >>> df = ps.DataFrame([[1, 2], [4, 5], [7, 8]],
         ...                   index=['cobra', 'viper', None],
         ...                   columns=['max_speed', 'shield'])
-        >>> df
+        >>> df  # doctest: +SKIP
                max_speed  shield
         cobra          1       2
         viper          4       5
-        NaN            7       8
+        None           7       8
 
         >>> df.index.dropna()
         Index(['cobra', 'viper'], dtype='object')
 
         Also support for MultiIndex
 
-        >>> midx = pd.MultiIndex([['lama', 'cow', 'falcon'],
-        ...                       [None, 'weight', 'length']],
-        ...                      [[0, 1, 1, 1, 1, 1, 2, 2, 2],
-        ...                       [0, 1, 1, 0, 1, 2, 1, 1, 2]])
-        >>> s = ps.Series([45, 200, 1.2, 30, 250, 1.5, 320, 1, None],
-        ...               index=midx)
-        >>> s
-        lama    NaN        45.0
-        cow     weight    200.0
-                weight      1.2
-                NaN        30.0
-                weight    250.0
-                length      1.5
-        falcon  weight    320.0
-                weight      1.0
-                length      NaN
-        dtype: float64
 
-        >>> s.index.dropna()  # doctest: +SKIP
-        MultiIndex([(   'cow', 'weight'),
-                    (   'cow', 'weight'),
-                    (   'cow', 'weight'),
-                    (   'cow', 'length'),
-                    ('falcon', 'weight'),
-                    ('falcon', 'weight'),
-                    ('falcon', 'length')],
+        >>> tuples = [(np.nan, 1.0), (2.0, 2.0), (np.nan, np.nan), (3.0, np.nan)]
+        >>> midx = ps.MultiIndex.from_tuples(tuples)
+        >>> midx  # doctest: +SKIP
+        MultiIndex([(nan, 1.0),
+                    (2.0, 2.0),
+                    (nan, nan),
+                    (3.0, nan)],
+                   )
+
+        >>> midx.dropna()  # doctest: +SKIP
+        MultiIndex([(2.0, 2.0)],
+                   )
+
+        >>> midx.dropna(how="all")  # doctest: +SKIP
+        MultiIndex([(nan, 1.0),
+                    (2.0, 2.0),
+                    (3.0, nan)],
                    )
         """
-        sdf = self._internal.spark_frame.select(self._internal.index_spark_columns).dropna()
+        if how not in ("any", "all"):
+            raise ValueError("invalid how option: %s" % how)
+
+        sdf = self._internal.spark_frame.select(self._internal.index_spark_columns).dropna(how=how)
         internal = InternalFrame(
             spark_frame=sdf,
             index_spark_columns=[
@@ -1179,6 +1242,7 @@ class Index(IndexOpsMixin):
         Examples
         --------
         >>> ps.DataFrame({'a': ['a', 'b', 'c']}, index=[1, 1, 3]).index.unique().sort_values()
+        ... # doctest: +SKIP
         Int64Index([1, 3], dtype='int64')
 
         >>> ps.DataFrame({'a': ['a', 'b', 'c']}, index=['d', 'e', 'e']).index.unique().sort_values()
@@ -1223,10 +1287,10 @@ class Index(IndexOpsMixin):
         Examples
         --------
         >>> index = ps.Index([1, 2, 3])
-        >>> index
+        >>> index  # doctest: +SKIP
         Int64Index([1, 2, 3], dtype='int64')
 
-        >>> index.drop([1])
+        >>> index.drop([1])  # doctest: +SKIP
         Int64Index([2, 3], dtype='int64')
         """
         internal = self._internal.resolved_copy
@@ -1268,7 +1332,7 @@ class Index(IndexOpsMixin):
         """
         Return Index if a valid level is given.
 
-        Examples:
+        Examples
         --------
         >>> psidx = ps.Index(['a', 'b', 'c'], name='ks')
         >>> psidx.get_level_values(0)
@@ -1456,7 +1520,7 @@ class Index(IndexOpsMixin):
 
         You can set sort to `True`, if you want to sort the resulting index.
 
-        >>> s1.index.symmetric_difference(s2.index, sort=True)
+        >>> s1.index.symmetric_difference(s2.index, sort=True)  # doctest: +SKIP
         Int64Index([1, 5], dtype='int64')
 
         You can also use the ``^`` operator:
@@ -1492,17 +1556,24 @@ class Index(IndexOpsMixin):
 
         return result
 
-    # TODO: return_indexer
-    def sort_values(self, ascending: bool = True) -> "Index":
+    def sort_values(
+        self, return_indexer: bool = False, ascending: bool = True
+    ) -> Union["Index", Tuple["Index", "Index"]]:
         """
-        Return a sorted copy of the index.
+        Return a sorted copy of the index, and optionally return the indices that
+        sorted the index itself.
 
         .. note:: This method is not supported for pandas when index has NaN value.
                   pandas raises unexpected TypeError, but we support treating NaN
                   as the smallest value.
+                  This method returns indexer as a pandas-on-Spark index while
+                  pandas returns it as a list. That's because indexer in pandas-on-Spark
+                  may not fit in memory.
 
         Parameters
         ----------
+        return_indexer : bool, default False
+            Should the indices that would sort the index be returned.
         ascending : bool, default True
             Should the index values be sorted in an ascending order.
 
@@ -1510,6 +1581,8 @@ class Index(IndexOpsMixin):
         -------
         sorted_index : ps.Index or ps.MultiIndex
             Sorted copy of the index.
+        indexer : ps.Index
+            The indices that the index itself was sorted by.
 
         See Also
         --------
@@ -1519,18 +1592,23 @@ class Index(IndexOpsMixin):
         Examples
         --------
         >>> idx = ps.Index([10, 100, 1, 1000])
-        >>> idx
+        >>> idx  # doctest: +SKIP
         Int64Index([10, 100, 1, 1000], dtype='int64')
 
         Sort values in ascending order (default behavior).
 
-        >>> idx.sort_values()
+        >>> idx.sort_values()  # doctest: +SKIP
         Int64Index([1, 10, 100, 1000], dtype='int64')
 
         Sort values in descending order.
 
-        >>> idx.sort_values(ascending=False)
+        >>> idx.sort_values(ascending=False)  # doctest: +SKIP
         Int64Index([1000, 100, 10, 1], dtype='int64')
+
+        Sort values in descending order, and also get the indices idx was sorted by.
+
+        >>> idx.sort_values(ascending=False, return_indexer=True)  # doctest: +SKIP
+        (Int64Index([1000, 100, 10, 1], dtype='int64'), Int64Index([3, 1, 0, 2], dtype='int64'))
 
         Support for MultiIndex.
 
@@ -1552,11 +1630,20 @@ class Index(IndexOpsMixin):
                     ('b', 'z', 3),
                     ('a', 'x', 1)],
                    )
+
+        >>> psidx.sort_values(ascending=False, return_indexer=True)  # doctest: +SKIP
+        (MultiIndex([('c', 'y', 2),
+                    ('b', 'z', 3),
+                    ('a', 'x', 1)],
+                   ), Int64Index([1, 2, 0], dtype='int64'))
         """
         sdf = self._internal.spark_frame
-        sdf = sdf.orderBy(*self._internal.index_spark_columns, ascending=ascending).select(
-            self._internal.index_spark_columns
-        )
+        if return_indexer:
+            sequence_col = verify_temp_column_name(sdf, "__distributed_sequence_column__")
+            sdf = InternalFrame.attach_distributed_sequence_column(sdf, column_name=sequence_col)
+
+        ordered_sdf = sdf.orderBy(*self._internal.index_spark_columns, ascending=ascending)
+        sdf = ordered_sdf.select(self._internal.index_spark_columns)
 
         internal = InternalFrame(
             spark_frame=sdf,
@@ -1566,7 +1653,21 @@ class Index(IndexOpsMixin):
             index_names=self._internal.index_names,
             index_fields=self._internal.index_fields,
         )
-        return DataFrame(internal).index
+        sorted_index = DataFrame(internal).index
+
+        if return_indexer:
+            alias_sequence_scol = scol_for(ordered_sdf, sequence_col).alias(
+                SPARK_DEFAULT_INDEX_NAME
+            )
+            indexer_sdf = ordered_sdf.select(alias_sequence_scol)
+            indexer_internal = InternalFrame(
+                spark_frame=indexer_sdf,
+                index_spark_columns=[scol_for(indexer_sdf, SPARK_DEFAULT_INDEX_NAME)],
+            )
+            indexer = DataFrame(indexer_internal).index
+            return sorted_index, indexer
+        else:
+            return sorted_index
 
     @no_type_check
     def sort(self, *args, **kwargs) -> None:
@@ -1607,11 +1708,10 @@ class Index(IndexOpsMixin):
         ('a', 'x', 1)
         """
         sdf = self._internal.spark_frame
-        min_row = cast(
-            pd.DataFrame,
+        min_row = (
             sdf.select(F.min(F.struct(*self._internal.index_spark_columns)).alias("min_row"))
             .select("min_row.*")
-            .toPandas(),
+            .toPandas()
         )
         result = tuple(min_row.iloc[0])
 
@@ -1649,11 +1749,10 @@ class Index(IndexOpsMixin):
         ('b', 'y', 2)
         """
         sdf = self._internal.spark_frame
-        max_row = cast(
-            pd.DataFrame,
+        max_row = (
             sdf.select(F.max(F.struct(*self._internal.index_spark_columns)).alias("max_row"))
             .select("max_row.*")
-            .toPandas(),
+            .toPandas()
         )
         result = tuple(max_row.iloc[0])
 
@@ -1673,13 +1772,13 @@ class Index(IndexOpsMixin):
         Examples
         --------
         >>> psidx = ps.Index([10, 10, 9, 8, 4, 2, 4, 4, 2, 2, 10, 10])
-        >>> psidx
+        >>> psidx  # doctest: +SKIP
         Int64Index([10, 10, 9, 8, 4, 2, 4, 4, 2, 2, 10, 10], dtype='int64')
 
-        >>> psidx.delete(0).sort_values()
+        >>> psidx.delete(0).sort_values()  # doctest: +SKIP
         Int64Index([2, 2, 2, 4, 4, 4, 8, 9, 10, 10, 10], dtype='int64')
 
-        >>> psidx.delete([0, 1, 2, 3, 10, 11]).sort_values()
+        >>> psidx.delete([0, 1, 2, 3, 10, 11]).sort_values()  # doctest: +SKIP
         Int64Index([2, 2, 2, 4, 4, 4], dtype='int64')
 
         MultiIndex
@@ -1789,10 +1888,10 @@ class Index(IndexOpsMixin):
         Examples
         --------
         >>> psidx = ps.Index([10, 5, 0, 5, 10, 5, 0, 10])
-        >>> psidx
+        >>> psidx  # doctest: +SKIP
         Int64Index([10, 5, 0, 5, 10, 5, 0, 10], dtype='int64')
 
-        >>> psidx.append(psidx)
+        >>> psidx.append(psidx)  # doctest: +SKIP
         Int64Index([10, 5, 0, 5, 10, 5, 0, 10, 10, 5, 0, 5, 10, 5, 0, 10], dtype='int64')
 
         Support for MiltiIndex
@@ -1811,6 +1910,7 @@ class Index(IndexOpsMixin):
                    )
         """
         from pyspark.pandas.indexes.multi import MultiIndex
+        from pyspark.pandas.indexes.category import CategoricalIndex
 
         if isinstance(self, MultiIndex) != isinstance(other, MultiIndex):
             raise NotImplementedError(
@@ -1822,6 +1922,9 @@ class Index(IndexOpsMixin):
             )
 
         index_fields = self._index_fields_for_union_like(other, func_name="append")
+        # Since pandas 1.5.0, the order of category matters.
+        if isinstance(other, CategoricalIndex):
+            other = other.reorder_categories(self.categories.to_list())
 
         sdf_self = self._internal.spark_frame.select(self._internal.index_spark_columns)
         sdf_other = other._internal.spark_frame.select(other._internal.index_spark_columns)
@@ -1859,7 +1962,7 @@ class Index(IndexOpsMixin):
         Examples
         --------
         >>> psidx = ps.Index([10, 9, 8, 7, 100, 5, 4, 3, 100, 3])
-        >>> psidx
+        >>> psidx  # doctest: +SKIP
         Int64Index([10, 9, 8, 7, 100, 5, 4, 3, 100, 3], dtype='int64')
 
         >>> psidx.argmax()
@@ -1907,7 +2010,7 @@ class Index(IndexOpsMixin):
         Examples
         --------
         >>> psidx = ps.Index([10, 9, 8, 7, 100, 5, 4, 3, 100, 3])
-        >>> psidx
+        >>> psidx  # doctest: +SKIP
         Int64Index([10, 9, 8, 7, 100, 5, 4, 3, 100, 3], dtype='int64')
 
         >>> psidx.argmin()
@@ -1959,10 +2062,10 @@ class Index(IndexOpsMixin):
         Examples
         --------
         >>> idx = ps.Index([1, 2, 3, 4])
-        >>> idx
+        >>> idx  # doctest: +SKIP
         Int64Index([1, 2, 3, 4], dtype='int64')
 
-        >>> idx.set_names('quarter')
+        >>> idx.set_names('quarter')  # doctest: +SKIP
         Int64Index([1, 2, 3, 4], dtype='int64', name='quarter')
 
         For MultiIndex
@@ -1986,11 +2089,10 @@ class Index(IndexOpsMixin):
         """
         from pyspark.pandas.indexes.multi import MultiIndex
 
-        if isinstance(self, MultiIndex):
-            if level is not None:
-                self_names = self.names
-                self_names[level] = names  # type: ignore
-                names = self_names
+        if isinstance(self, MultiIndex) and level is not None:
+            self_names = self.names
+            self_names[level] = names  # type: ignore[index]
+            names = self_names
         return self.rename(name=names, inplace=inplace)
 
     def difference(self, other: "Index", sort: Optional[bool] = None) -> "Index":
@@ -2017,7 +2119,7 @@ class Index(IndexOpsMixin):
 
         >>> idx1 = ps.Index([2, 1, 3, 4])
         >>> idx2 = ps.Index([3, 4, 5, 6])
-        >>> idx1.difference(idx2, sort=True)
+        >>> idx1.difference(idx2, sort=True)  # doctest: +SKIP
         Int64Index([1, 2], dtype='int64')
 
         MultiIndex
@@ -2059,9 +2161,7 @@ class Index(IndexOpsMixin):
                 [isinstance(item, tuple) for item in other]
             )
             if is_other_list_of_tuples:
-                other = MultiIndex.from_tuples(other)  # type: ignore
-            elif isinstance(other, Series):
-                other = Index(other)
+                other = MultiIndex.from_tuples(other)  # type: ignore[arg-type]
             else:
                 raise TypeError("other must be a MultiIndex or a list of tuples")
 
@@ -2089,7 +2189,7 @@ class Index(IndexOpsMixin):
         elif isinstance(self, type(other)) and not isinstance(self, MultiIndex):
             if self.name == other.name:
                 result.name = self.name
-        return result if sort is None else result.sort_values()
+        return result if sort is None else cast(Index, result.sort_values())
 
     @property
     def is_all_dates(self) -> bool:
@@ -2097,6 +2197,8 @@ class Index(IndexOpsMixin):
         Return if all data types of the index are datetime.
         remember that since pandas-on-Spark does not support multiple data types in an index,
         so it returns True if any type of data is datetime.
+
+        .. deprecated:: 3.4.0
 
         Examples
         --------
@@ -2117,13 +2219,18 @@ class Index(IndexOpsMixin):
         True
 
         >>> idx = ps.Index([0, 1, 2])
-        >>> idx
+        >>> idx  # doctest: +SKIP
         Int64Index([0, 1, 2], dtype='int64')
 
         >>> idx.is_all_dates
         False
         """
-        return isinstance(self.spark.data_type, TimestampType)
+        warnings.warn(
+            "Index.is_all_dates is deprecated, will be removed in a future version.  "
+            "check index.inferred_type instead",
+            FutureWarning,
+        )
+        return isinstance(self.spark.data_type, (TimestampType, TimestampNTZType))
 
     def repeat(self, repeats: int) -> "Index":
         """
@@ -2182,9 +2289,9 @@ class Index(IndexOpsMixin):
         elif repeats < 0:
             raise ValueError("negative dimensions are not allowed")
 
-        psdf = DataFrame(self._internal.resolved_copy)  # type: DataFrame
+        psdf: DataFrame = DataFrame(self._internal.resolved_copy)
         if repeats == 0:
-            return DataFrame(psdf._internal.with_filter(SF.lit(False))).index
+            return DataFrame(psdf._internal.with_filter(F.lit(False))).index
         else:
             return ps.concat([psdf] * repeats).index
 
@@ -2232,17 +2339,17 @@ class Index(IndexOpsMixin):
         """
         sdf = self._internal.spark_frame
         if self.is_monotonic_increasing:
-            sdf = sdf.where(self.spark.column <= SF.lit(label).cast(self.spark.data_type)).select(
+            sdf = sdf.where(self.spark.column <= F.lit(label).cast(self.spark.data_type)).select(
                 F.max(self.spark.column)
             )
         elif self.is_monotonic_decreasing:
-            sdf = sdf.where(self.spark.column >= SF.lit(label).cast(self.spark.data_type)).select(
+            sdf = sdf.where(self.spark.column >= F.lit(label).cast(self.spark.data_type)).select(
                 F.min(self.spark.column)
             )
         else:
             raise ValueError("index must be monotonic increasing or decreasing")
 
-        result = cast(pd.DataFrame, sdf.toPandas()).iloc[0, 0]
+        result = sdf.toPandas().iloc[0, 0]
         return result if result is not None else np.nan
 
     def _index_fields_for_union_like(
@@ -2296,7 +2403,7 @@ class Index(IndexOpsMixin):
 
         >>> idx1 = ps.Index([1, 2, 3, 4])
         >>> idx2 = ps.Index([3, 4, 5, 6])
-        >>> idx1.union(idx2).sort_values()
+        >>> idx1.union(idx2).sort_values()  # doctest: +SKIP
         Int64Index([1, 2, 3, 4, 5, 6], dtype='int64')
 
         MultiIndex
@@ -2316,9 +2423,10 @@ class Index(IndexOpsMixin):
 
         sort = True if sort is None else sort
         sort = validate_bool_kwarg(sort, "sort")
+        other_idx: Index
         if isinstance(self, MultiIndex):
             if isinstance(other, MultiIndex):
-                other_idx = other  # type: Index
+                other_idx = other
             elif isinstance(other, list) and all(isinstance(item, tuple) for item in other):
                 other_idx = MultiIndex.from_tuples(other)
             else:
@@ -2361,7 +2469,7 @@ class Index(IndexOpsMixin):
         When Index contains null values the result can be different with pandas
         since pandas-on-Spark cast integer to float when Index contains null values.
 
-        >>> ps.Index([1, 2, 3, None])
+        >>> ps.Index([1, 2, 3, None])  # doctest: +SKIP
         Float64Index([1.0, 2.0, 3.0, nan], dtype='float64')
 
         Examples
@@ -2402,34 +2510,37 @@ class Index(IndexOpsMixin):
         --------
         >>> idx1 = ps.Index([1, 2, 3, 4])
         >>> idx2 = ps.Index([3, 4, 5, 6])
-        >>> idx1.intersection(idx2).sort_values()
+        >>> idx1.intersection(idx2).sort_values()  # doctest: +SKIP
         Int64Index([3, 4], dtype='int64')
         """
         from pyspark.pandas.indexes.multi import MultiIndex
 
+        other_idx: Index
         if isinstance(other, DataFrame):
             raise ValueError("Index data must be 1-dimensional")
         elif isinstance(other, MultiIndex):
             # Always returns a no-named empty Index if `other` is MultiIndex.
             return self._psdf.head(0).index.rename(None)
         elif isinstance(other, Index):
-            spark_frame_other = other.to_frame().to_spark()
-            keep_name = self.name == other.name
+            other_idx = other
+            spark_frame_other = other_idx.to_frame()._to_spark()
+            keep_name = self.name == other_idx.name
         elif isinstance(other, Series):
-            spark_frame_other = other.to_frame().to_spark()
+            other_idx = Index(other)
+            spark_frame_other = other_idx.to_frame()._to_spark()
             keep_name = True
         elif is_list_like(other):
-            other = Index(other)
-            if isinstance(other, MultiIndex):
-                return other.to_frame().head(0).index
-            spark_frame_other = other.to_frame().to_spark()
+            other_idx = Index(other)
+            if isinstance(other_idx, MultiIndex):
+                raise ValueError("Names should be list-like for a MultiIndex")
+            spark_frame_other = other_idx.to_frame()._to_spark()
             keep_name = True
         else:
             raise TypeError("Input must be Index or array-like")
 
-        index_fields = self._index_fields_for_union_like(other, func_name="intersection")
+        index_fields = self._index_fields_for_union_like(other_idx, func_name="intersection")
 
-        spark_frame_self = self.to_frame(name=SPARK_DEFAULT_INDEX_NAME).to_spark()
+        spark_frame_self = self.to_frame(name=SPARK_DEFAULT_INDEX_NAME)._to_spark()
         spark_frame_intersected = spark_frame_self.intersect(spark_frame_other)
         if keep_name:
             index_names = self._internal.index_names
@@ -2473,6 +2584,9 @@ class Index(IndexOpsMixin):
 
         Follows Python list.append semantics for negative values.
 
+        .. versionchanged:: 3.4.0
+           Raise IndexError when loc is out of bounds to follow Pandas 1.4+ behavior
+
         Parameters
         ----------
         loc : int
@@ -2485,24 +2599,22 @@ class Index(IndexOpsMixin):
         Examples
         --------
         >>> psidx = ps.Index([1, 2, 3, 4, 5])
-        >>> psidx.insert(3, 100)
+        >>> psidx.insert(3, 100)  # doctest: +SKIP
         Int64Index([1, 2, 3, 100, 4, 5], dtype='int64')
 
         For negative values
 
         >>> psidx = ps.Index([1, 2, 3, 4, 5])
-        >>> psidx.insert(-3, 100)
+        >>> psidx.insert(-3, 100)  # doctest: +SKIP
         Int64Index([1, 2, 100, 3, 4, 5], dtype='int64')
         """
-        if loc < 0:
-            length = len(self)
-            loc = loc + length
-            loc = 0 if loc < 0 else loc
+        validate_index_loc(self, loc)
+        loc = loc + len(self) if loc < 0 else loc
 
         index_name = self._internal.index_spark_column_names[0]
-        sdf_before = self.to_frame(name=index_name)[:loc].to_spark()
-        sdf_middle = Index([item], dtype=self.dtype).to_frame(name=index_name).to_spark()
-        sdf_after = self.to_frame(name=index_name)[loc:].to_spark()
+        sdf_before = self.to_frame(name=index_name)[:loc]._to_spark()
+        sdf_middle = Index([item], dtype=self.dtype).to_frame(name=index_name)._to_spark()
+        sdf_after = self.to_frame(name=index_name)[loc:]._to_spark()
         sdf = sdf_before.union(sdf_middle).union(sdf_after)
 
         internal = InternalFrame(
@@ -2547,6 +2659,10 @@ class Index(IndexOpsMixin):
         >>> midx.to_list()
         [(1, 'red'), (1, 'blue'), (2, 'red'), (2, 'green')]
         """
+        log_advice(
+            "`to_list` loads all data into the driver's memory. "
+            "It should only be used if the resulting list is expected to be small."
+        )
         return self._to_internal_pandas().tolist()
 
     tolist = to_list
@@ -2577,7 +2693,7 @@ class Index(IndexOpsMixin):
         if hasattr(MissingPandasLikeIndex, item):
             property_or_func = getattr(MissingPandasLikeIndex, item)
             if isinstance(property_or_func, property):
-                return property_or_func.fget(self)  # type: ignore
+                return property_or_func.fget(self)
             else:
                 return partial(property_or_func, self)
         raise AttributeError("'{}' object has no attribute '{}'".format(type(self).__name__, item))
@@ -2600,8 +2716,35 @@ class Index(IndexOpsMixin):
     def __iter__(self) -> Iterator:
         return MissingPandasLikeIndex.__iter__(self)
 
+    def __and__(self, other: "Index") -> "Index":
+        warnings.warn(
+            "Index.__and__ operating as a set operation is deprecated, "
+            "in the future this will be a logical operation matching Series.__and__.  "
+            "Use index.intersection(other) instead",
+            FutureWarning,
+        )
+        return self.intersection(other)
+
+    def __or__(self, other: "Index") -> "Index":
+        warnings.warn(
+            "Index.__or__ operating as a set operation is deprecated, "
+            "in the future this will be a logical operation matching Series.__or__.  "
+            "Use index.union(other) instead",
+            FutureWarning,
+        )
+        return self.union(other)
+
     def __xor__(self, other: "Index") -> "Index":
+        warnings.warn(
+            "Index.__xor__ operating as a set operation is deprecated, "
+            "in the future this will be a logical operation matching Series.__xor__.  "
+            "Use index.symmetric_difference(other) instead",
+            FutureWarning,
+        )
         return self.symmetric_difference(other)
+
+    def __rxor__(self, other: Any) -> "Index":
+        return NotImplemented
 
     def __bool__(self) -> bool:
         raise ValueError(

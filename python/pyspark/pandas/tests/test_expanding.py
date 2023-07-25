@@ -25,34 +25,38 @@ from pyspark.pandas.window import Expanding
 from pyspark.testing.pandasutils import PandasOnSparkTestCase, TestUtils
 
 
-class ExpandingTest(PandasOnSparkTestCase, TestUtils):
-    def _test_expanding_func(self, f):
-        pser = pd.Series([1, 2, 3], index=np.random.rand(3))
+class ExpandingTestsMixin:
+    def _test_expanding_func(self, ps_func, pd_func=None):
+        if not pd_func:
+            pd_func = ps_func
+        if isinstance(pd_func, str):
+            pd_func = self.convert_str_to_lambda(pd_func)
+        if isinstance(ps_func, str):
+            ps_func = self.convert_str_to_lambda(ps_func)
+        pser = pd.Series([1, 2, 3, 7, 9, 8], index=np.random.rand(6), name="a")
         psser = ps.from_pandas(pser)
-        self.assert_eq(getattr(psser.expanding(2), f)(), getattr(pser.expanding(2), f)())
-        self.assert_eq(
-            getattr(psser.expanding(2), f)().sum(), getattr(pser.expanding(2), f)().sum()
-        )
+        self.assert_eq(ps_func(psser.expanding(2)), pd_func(pser.expanding(2)), almost=True)
+        self.assert_eq(ps_func(psser.expanding(2)), pd_func(pser.expanding(2)), almost=True)
 
         # Multiindex
         pser = pd.Series(
             [1, 2, 3], index=pd.MultiIndex.from_tuples([("a", "x"), ("a", "y"), ("b", "z")])
         )
         psser = ps.from_pandas(pser)
-        self.assert_eq(getattr(psser.expanding(2), f)(), getattr(pser.expanding(2), f)())
+        self.assert_eq(ps_func(psser.expanding(2)), pd_func(pser.expanding(2)))
 
         pdf = pd.DataFrame(
             {"a": [1.0, 2.0, 3.0, 2.0], "b": [4.0, 2.0, 3.0, 1.0]}, index=np.random.rand(4)
         )
         psdf = ps.from_pandas(pdf)
-        self.assert_eq(getattr(psdf.expanding(2), f)(), getattr(pdf.expanding(2), f)())
-        self.assert_eq(getattr(psdf.expanding(2), f)().sum(), getattr(pdf.expanding(2), f)().sum())
+        self.assert_eq(ps_func(psdf.expanding(2)), pd_func(pdf.expanding(2)))
+        self.assert_eq(ps_func(psdf.expanding(2)).sum(), pd_func(pdf.expanding(2)).sum())
 
         # Multiindex column
         columns = pd.MultiIndex.from_tuples([("a", "x"), ("a", "y")])
         pdf.columns = columns
         psdf.columns = columns
-        self.assert_eq(getattr(psdf.expanding(2), f)(), getattr(pdf.expanding(2), f)())
+        self.assert_eq(ps_func(psdf.expanding(2)), pd_func(pdf.expanding(2)))
 
     def test_expanding_error(self):
         with self.assertRaisesRegex(ValueError, "min_periods must be >= 0"):
@@ -67,39 +71,7 @@ class ExpandingTest(PandasOnSparkTestCase, TestUtils):
         self.assertEqual(repr(ps.range(10).expanding(5)), "Expanding [min_periods=5]")
 
     def test_expanding_count(self):
-        # The behaviour of Expanding.count are different between pandas>=1.0.0 and lower,
-        # and we're following the behaviour of latest version of pandas.
-        if LooseVersion(pd.__version__) >= LooseVersion("1.0.0"):
-            self._test_expanding_func("count")
-        else:
-            # Series
-            idx = np.random.rand(3)
-            psser = ps.Series([1, 2, 3], index=idx, name="a")
-            expected_result = pd.Series([None, 2.0, 3.0], index=idx, name="a")
-            self.assert_eq(psser.expanding(2).count().sort_index(), expected_result.sort_index())
-            self.assert_eq(psser.expanding(2).count().sum(), expected_result.sum())
-
-            # MultiIndex
-            midx = pd.MultiIndex.from_tuples([("a", "x"), ("a", "y"), ("b", "z")])
-            psser = ps.Series([1, 2, 3], index=midx, name="a")
-            expected_result = pd.Series([None, 2.0, 3.0], index=midx, name="a")
-            self.assert_eq(psser.expanding(2).count().sort_index(), expected_result.sort_index())
-
-            # DataFrame
-            psdf = ps.DataFrame({"a": [1, 2, 3, 2], "b": [4.0, 2.0, 3.0, 1.0]})
-            expected_result = pd.DataFrame({"a": [None, 2.0, 3.0, 4.0], "b": [None, 2.0, 3.0, 4.0]})
-            self.assert_eq(psdf.expanding(2).count().sort_index(), expected_result.sort_index())
-            self.assert_eq(psdf.expanding(2).count().sum(), expected_result.sum())
-
-            # MultiIndex columns
-            idx = np.random.rand(4)
-            psdf = ps.DataFrame({"a": [1, 2, 3, 2], "b": [4.0, 2.0, 3.0, 1.0]}, index=idx)
-            psdf.columns = pd.MultiIndex.from_tuples([("a", "x"), ("a", "y")])
-            expected_result = pd.DataFrame(
-                {("a", "x"): [None, 2.0, 3.0, 4.0], ("a", "y"): [None, 2.0, 3.0, 4.0]},
-                index=idx,
-            )
-            self.assert_eq(psdf.expanding(2).count().sort_index(), expected_result.sort_index())
+        self._test_expanding_func("count")
 
     def test_expanding_min(self):
         self._test_expanding_func("min")
@@ -110,6 +82,9 @@ class ExpandingTest(PandasOnSparkTestCase, TestUtils):
     def test_expanding_mean(self):
         self._test_expanding_func("mean")
 
+    def test_expanding_quantile(self):
+        self._test_expanding_func(lambda x: x.quantile(0.5), lambda x: x.quantile(0.5, "lower"))
+
     def test_expanding_sum(self):
         self._test_expanding_func("sum")
 
@@ -119,16 +94,28 @@ class ExpandingTest(PandasOnSparkTestCase, TestUtils):
     def test_expanding_var(self):
         self._test_expanding_func("var")
 
-    def _test_groupby_expanding_func(self, f):
+    def test_expanding_skew(self):
+        self._test_expanding_func("skew")
+
+    def test_expanding_kurt(self):
+        self._test_expanding_func("kurt")
+
+    def _test_groupby_expanding_func(self, ps_func, pd_func=None):
+        if not pd_func:
+            pd_func = ps_func
+        if isinstance(pd_func, str):
+            pd_func = self.convert_str_to_lambda(pd_func)
+        if isinstance(ps_func, str):
+            ps_func = self.convert_str_to_lambda(ps_func)
         pser = pd.Series([1, 2, 3, 2], index=np.random.rand(4), name="a")
         psser = ps.from_pandas(pser)
         self.assert_eq(
-            getattr(psser.groupby(psser).expanding(2), f)().sort_index(),
-            getattr(pser.groupby(pser).expanding(2), f)().sort_index(),
+            ps_func(psser.groupby(psser).expanding(2)).sort_index(),
+            pd_func(pser.groupby(pser).expanding(2)).sort_index(),
         )
         self.assert_eq(
-            getattr(psser.groupby(psser).expanding(2), f)().sum(),
-            getattr(pser.groupby(pser).expanding(2), f)().sum(),
+            ps_func(psser.groupby(psser).expanding(2)).sum(),
+            pd_func(pser.groupby(pser).expanding(2)).sum(),
         )
 
         # Multiindex
@@ -139,8 +126,8 @@ class ExpandingTest(PandasOnSparkTestCase, TestUtils):
         )
         psser = ps.from_pandas(pser)
         self.assert_eq(
-            getattr(psser.groupby(psser).expanding(2), f)().sort_index(),
-            getattr(pser.groupby(pser).expanding(2), f)().sort_index(),
+            ps_func(psser.groupby(psser).expanding(2)).sort_index(),
+            pd_func(pser.groupby(pser).expanding(2)).sort_index(),
         )
 
         pdf = pd.DataFrame({"a": [1.0, 2.0, 3.0, 2.0], "b": [4.0, 2.0, 3.0, 1.0]})
@@ -149,42 +136,42 @@ class ExpandingTest(PandasOnSparkTestCase, TestUtils):
         # The behavior of GroupBy.expanding is changed from pandas 1.3.
         if LooseVersion(pd.__version__) >= LooseVersion("1.3"):
             self.assert_eq(
-                getattr(psdf.groupby(psdf.a).expanding(2), f)().sort_index(),
-                getattr(pdf.groupby(pdf.a).expanding(2), f)().sort_index(),
+                ps_func(psdf.groupby(psdf.a).expanding(2)).sort_index(),
+                pd_func(pdf.groupby(pdf.a).expanding(2)).sort_index(),
             )
             self.assert_eq(
-                getattr(psdf.groupby(psdf.a).expanding(2), f)().sum(),
-                getattr(pdf.groupby(pdf.a).expanding(2), f)().sum(),
+                ps_func(psdf.groupby(psdf.a).expanding(2)).sum(),
+                pd_func(pdf.groupby(pdf.a).expanding(2)).sum(),
             )
             self.assert_eq(
-                getattr(psdf.groupby(psdf.a + 1).expanding(2), f)().sort_index(),
-                getattr(pdf.groupby(pdf.a + 1).expanding(2), f)().sort_index(),
+                ps_func(psdf.groupby(psdf.a + 1).expanding(2)).sort_index(),
+                pd_func(pdf.groupby(pdf.a + 1).expanding(2)).sort_index(),
             )
         else:
             self.assert_eq(
-                getattr(psdf.groupby(psdf.a).expanding(2), f)().sort_index(),
-                getattr(pdf.groupby(pdf.a).expanding(2), f)().drop("a", axis=1).sort_index(),
+                ps_func(psdf.groupby(psdf.a).expanding(2)).sort_index(),
+                pd_func(pdf.groupby(pdf.a).expanding(2)).drop("a", axis=1).sort_index(),
             )
             self.assert_eq(
-                getattr(psdf.groupby(psdf.a).expanding(2), f)().sum(),
-                getattr(pdf.groupby(pdf.a).expanding(2), f)().sum().drop("a"),
+                ps_func(psdf.groupby(psdf.a).expanding(2)).sum(),
+                pd_func(pdf.groupby(pdf.a).expanding(2)).sum().drop("a"),
             )
             self.assert_eq(
-                getattr(psdf.groupby(psdf.a + 1).expanding(2), f)().sort_index(),
-                getattr(pdf.groupby(pdf.a + 1).expanding(2), f)().drop("a", axis=1).sort_index(),
+                ps_func(psdf.groupby(psdf.a + 1).expanding(2)).sort_index(),
+                pd_func(pdf.groupby(pdf.a + 1).expanding(2)).drop("a", axis=1).sort_index(),
             )
 
         self.assert_eq(
-            getattr(psdf.b.groupby(psdf.a).expanding(2), f)().sort_index(),
-            getattr(pdf.b.groupby(pdf.a).expanding(2), f)().sort_index(),
+            ps_func(psdf.b.groupby(psdf.a).expanding(2)).sort_index(),
+            pd_func(pdf.b.groupby(pdf.a).expanding(2)).sort_index(),
         )
         self.assert_eq(
-            getattr(psdf.groupby(psdf.a)["b"].expanding(2), f)().sort_index(),
-            getattr(pdf.groupby(pdf.a)["b"].expanding(2), f)().sort_index(),
+            ps_func(psdf.groupby(psdf.a)["b"].expanding(2)).sort_index(),
+            pd_func(pdf.groupby(pdf.a)["b"].expanding(2)).sort_index(),
         )
         self.assert_eq(
-            getattr(psdf.groupby(psdf.a)[["b"]].expanding(2), f)().sort_index(),
-            getattr(pdf.groupby(pdf.a)[["b"]].expanding(2), f)().sort_index(),
+            ps_func(psdf.groupby(psdf.a)[["b"]].expanding(2)).sort_index(),
+            pd_func(pdf.groupby(pdf.a)[["b"]].expanding(2)).sort_index(),
         )
 
         # Multiindex column
@@ -195,123 +182,29 @@ class ExpandingTest(PandasOnSparkTestCase, TestUtils):
         # The behavior of GroupBy.expanding is changed from pandas 1.3.
         if LooseVersion(pd.__version__) >= LooseVersion("1.3"):
             self.assert_eq(
-                getattr(psdf.groupby(("a", "x")).expanding(2), f)().sort_index(),
-                getattr(pdf.groupby(("a", "x")).expanding(2), f)().sort_index(),
+                ps_func(psdf.groupby(("a", "x")).expanding(2)).sort_index(),
+                pd_func(pdf.groupby(("a", "x")).expanding(2)).sort_index(),
             )
 
             self.assert_eq(
-                getattr(psdf.groupby([("a", "x"), ("a", "y")]).expanding(2), f)().sort_index(),
-                getattr(pdf.groupby([("a", "x"), ("a", "y")]).expanding(2), f)().sort_index(),
+                ps_func(psdf.groupby([("a", "x"), ("a", "y")]).expanding(2)).sort_index(),
+                pd_func(pdf.groupby([("a", "x"), ("a", "y")]).expanding(2)).sort_index(),
             )
         else:
             self.assert_eq(
-                getattr(psdf.groupby(("a", "x")).expanding(2), f)().sort_index(),
-                getattr(pdf.groupby(("a", "x")).expanding(2), f)()
-                .drop(("a", "x"), axis=1)
-                .sort_index(),
+                ps_func(psdf.groupby(("a", "x")).expanding(2)).sort_index(),
+                pd_func(pdf.groupby(("a", "x")).expanding(2)).drop(("a", "x"), axis=1).sort_index(),
             )
 
             self.assert_eq(
-                getattr(psdf.groupby([("a", "x"), ("a", "y")]).expanding(2), f)().sort_index(),
-                getattr(pdf.groupby([("a", "x"), ("a", "y")]).expanding(2), f)()
+                ps_func(psdf.groupby([("a", "x"), ("a", "y")]).expanding(2)).sort_index(),
+                pd_func(pdf.groupby([("a", "x"), ("a", "y")]).expanding(2))
                 .drop([("a", "x"), ("a", "y")], axis=1)
                 .sort_index(),
             )
 
     def test_groupby_expanding_count(self):
-        # The behaviour of ExpandingGroupby.count are different between pandas>=1.0.0 and lower,
-        # and we're following the behaviour of latest version of pandas.
-        if LooseVersion(pd.__version__) >= LooseVersion("1.0.0"):
-            self._test_groupby_expanding_func("count")
-        else:
-            # Series
-            psser = ps.Series([1, 2, 3, 2], index=np.random.rand(4))
-            midx = pd.MultiIndex.from_tuples(
-                list(zip(psser.to_pandas().values, psser.index.to_pandas().values))
-            )
-            expected_result = pd.Series([np.nan, np.nan, np.nan, 2], index=midx)
-            self.assert_eq(
-                psser.groupby(psser).expanding(2).count().sort_index(), expected_result.sort_index()
-            )
-            self.assert_eq(psser.groupby(psser).expanding(2).count().sum(), expected_result.sum())
-
-            # MultiIndex
-            psser = ps.Series(
-                [1, 2, 3, 2],
-                index=pd.MultiIndex.from_tuples([("a", "x"), ("a", "y"), ("b", "z"), ("a", "y")]),
-            )
-            midx = pd.MultiIndex.from_tuples(
-                [(1, "a", "x"), (2, "a", "y"), (3, "b", "z"), (2, "a", "y")]
-            )
-            expected_result = pd.Series([np.nan, np.nan, np.nan, 2], index=midx)
-            self.assert_eq(
-                psser.groupby(psser).expanding(2).count().sort_index(), expected_result.sort_index()
-            )
-
-            # DataFrame
-            psdf = ps.DataFrame({"a": [1, 2, 3, 2], "b": [4.0, 2.0, 3.0, 1.0]})
-            midx = pd.MultiIndex.from_tuples([(1, 0), (2, 1), (2, 3), (3, 2)], names=["a", None])
-            expected_result = pd.DataFrame(
-                {"a": [None, None, 2.0, None], "b": [None, None, 2.0, None]}, index=midx
-            )
-            self.assert_eq(
-                psdf.groupby(psdf.a).expanding(2).count().sort_index(), expected_result.sort_index()
-            )
-            self.assert_eq(psdf.groupby(psdf.a).expanding(2).count().sum(), expected_result.sum())
-            expected_result = pd.DataFrame(
-                {"a": [None, None, 2.0, None], "b": [None, None, 2.0, None]},
-                index=pd.MultiIndex.from_tuples(
-                    [(2, 0), (3, 1), (3, 3), (4, 2)], names=["a", None]
-                ),
-            )
-            self.assert_eq(
-                psdf.groupby(psdf.a + 1).expanding(2).count().sort_index(),
-                expected_result.sort_index(),
-            )
-            expected_result = pd.Series([None, None, 2.0, None], index=midx, name="b")
-            self.assert_eq(
-                psdf.b.groupby(psdf.a).expanding(2).count().sort_index(),
-                expected_result.sort_index(),
-            )
-            self.assert_eq(
-                psdf.groupby(psdf.a)["b"].expanding(2).count().sort_index(),
-                expected_result.sort_index(),
-            )
-            expected_result = pd.DataFrame({"b": [None, None, 2.0, None]}, index=midx)
-            self.assert_eq(
-                psdf.groupby(psdf.a)[["b"]].expanding(2).count().sort_index(),
-                expected_result.sort_index(),
-            )
-
-            # MultiIndex column
-            psdf = ps.DataFrame({"a": [1, 2, 3, 2], "b": [4.0, 2.0, 3.0, 1.0]})
-            psdf.columns = pd.MultiIndex.from_tuples([("a", "x"), ("a", "y")])
-            midx = pd.MultiIndex.from_tuples(
-                [(1, 0), (2, 1), (2, 3), (3, 2)], names=[("a", "x"), None]
-            )
-            expected_result = pd.DataFrame(
-                {"a": [None, None, 2.0, None], "b": [None, None, 2.0, None]}, index=midx
-            )
-            expected_result.columns = pd.MultiIndex.from_tuples([("a", "x"), ("a", "y")])
-            self.assert_eq(
-                psdf.groupby(("a", "x")).expanding(2).count().sort_index(),
-                expected_result.sort_index(),
-            )
-            midx = pd.MultiIndex.from_tuples(
-                [(1, 4.0, 0), (2, 1.0, 3), (2, 2.0, 1), (3, 3.0, 2)],
-                names=[("a", "x"), ("a", "y"), None],
-            )
-            expected_result = pd.DataFrame(
-                {
-                    ("a", "x"): [np.nan, np.nan, np.nan, np.nan],
-                    ("a", "y"): [np.nan, np.nan, np.nan, np.nan],
-                },
-                index=midx,
-            )
-            self.assert_eq(
-                psdf.groupby([("a", "x"), ("a", "y")]).expanding(2).count().sort_index(),
-                expected_result.sort_index(),
-            )
+        self._test_groupby_expanding_func("count")
 
     def test_groupby_expanding_min(self):
         self._test_groupby_expanding_func("min")
@@ -322,6 +215,11 @@ class ExpandingTest(PandasOnSparkTestCase, TestUtils):
     def test_groupby_expanding_mean(self):
         self._test_groupby_expanding_func("mean")
 
+    def test_groupby_expanding_quantile(self):
+        self._test_groupby_expanding_func(
+            lambda x: x.quantile(0.5), lambda x: x.quantile(0.5, "lower")
+        )
+
     def test_groupby_expanding_sum(self):
         self._test_groupby_expanding_func("sum")
 
@@ -331,13 +229,23 @@ class ExpandingTest(PandasOnSparkTestCase, TestUtils):
     def test_groupby_expanding_var(self):
         self._test_groupby_expanding_func("var")
 
+    def test_groupby_expanding_skew(self):
+        self._test_groupby_expanding_func("skew")
+
+    def test_groupby_expanding_kurt(self):
+        self._test_groupby_expanding_func("kurt")
+
+
+class ExpandingTests(ExpandingTestsMixin, PandasOnSparkTestCase, TestUtils):
+    pass
+
 
 if __name__ == "__main__":
     import unittest
     from pyspark.pandas.tests.test_expanding import *  # noqa: F401
 
     try:
-        import xmlrunner  # type: ignore[import]
+        import xmlrunner
 
         testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
     except ImportError:

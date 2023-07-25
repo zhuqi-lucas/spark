@@ -32,6 +32,7 @@ import org.apache.spark.{SparkContext, SparkEnv}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow
 import org.apache.spark.sql.catalyst.util.UnsafeRowUtils
+import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.execution.streaming.StatefulOperatorStateInfo
 import org.apache.spark.sql.types.StructType
@@ -127,6 +128,10 @@ trait StateStore extends ReadStateStore {
   /**
    * Return an iterator containing all the key-value pairs in the StateStore. Implementations must
    * ensure that updates (puts, removes) can be made while iterating over this iterator.
+   *
+   * It is not required for implementations to ensure the iterator reflects all updates being
+   * performed after initialization of the iterator. Callers should perform all updates before
+   * calling this method if all updates should be visible in the returned iterator.
    */
   override def iterator(): Iterator[UnsafeRowPair]
 
@@ -221,12 +226,12 @@ case class StateStoreCustomTimingMetric(name: String, desc: String) extends Stat
 /**
  * An exception thrown when an invalid UnsafeRow is detected in state store.
  */
-class InvalidUnsafeRowException
+class InvalidUnsafeRowException(error: String)
   extends RuntimeException("The streaming query failed by state format invalidation. " +
     "The following reasons may cause this: 1. An old Spark version wrote the checkpoint that is " +
     "incompatible with the current one; 2. Broken checkpoint files; 3. The query is changed " +
     "among restart. For the first case, you can try to restart the application without " +
-    "checkpoint or use the legacy Spark version to process the streaming state.", null)
+    s"checkpoint or use the legacy Spark version to process the streaming state.\n$error", null)
 
 /**
  * Trait representing a provider that provide [[StateStore]] instances representing
@@ -337,12 +342,13 @@ object StateStoreProvider {
       valueSchema: StructType,
       conf: StateStoreConf): Unit = {
     if (conf.formatValidationEnabled) {
-      if (!UnsafeRowUtils.validateStructuralIntegrity(keyRow, keySchema)) {
-        throw new InvalidUnsafeRowException
-      }
-      if (conf.formatValidationCheckValue &&
-          !UnsafeRowUtils.validateStructuralIntegrity(valueRow, valueSchema)) {
-        throw new InvalidUnsafeRowException
+      val validationError = UnsafeRowUtils.validateStructuralIntegrityWithReason(keyRow, keySchema)
+      validationError.foreach { error => throw new InvalidUnsafeRowException(error) }
+
+      if (conf.formatValidationCheckValue) {
+        val validationError =
+          UnsafeRowUtils.validateStructuralIntegrityWithReason(valueRow, valueSchema)
+        validationError.foreach { error => throw new InvalidUnsafeRowException(error) }
       }
     }
   }
@@ -393,6 +399,12 @@ case class StateStoreId(
     } else {
       new Path(checkpointRootLocation, s"$operatorId/$partitionId/$storeName")
     }
+  }
+
+  override def toString: String = {
+    s"""StateStoreId[ checkpointRootLocation=$checkpointRootLocation, operatorId=$operatorId,
+       | partitionId=$partitionId, storeName=$storeName ]
+       |""".stripMargin.replaceAll("\n", "")
   }
 }
 
@@ -475,7 +487,9 @@ object StateStore extends Logging {
       version: Long,
       storeConf: StateStoreConf,
       hadoopConf: Configuration): ReadStateStore = {
-    require(version >= 0)
+    if (version < 0) {
+      throw QueryExecutionErrors.unexpectedStateStoreVersion(version)
+    }
     val storeProvider = getStateStoreProvider(storeProviderId, keySchema, valueSchema,
       numColsPrefixKey, storeConf, hadoopConf)
     storeProvider.getReadStore(version)
@@ -490,7 +504,9 @@ object StateStore extends Logging {
       version: Long,
       storeConf: StateStoreConf,
       hadoopConf: Configuration): StateStore = {
-    require(version >= 0)
+    if (version < 0) {
+      throw QueryExecutionErrors.unexpectedStateStoreVersion(version)
+    }
     val storeProvider = getStateStoreProvider(storeProviderId, keySchema, valueSchema,
       numColsPrefixKey, storeConf, hadoopConf)
     storeProvider.getStore(version)
@@ -511,7 +527,12 @@ object StateStore extends Logging {
           val checker = new StateSchemaCompatibilityChecker(storeProviderId, hadoopConf)
           // regardless of configuration, we check compatibility to at least write schema file
           // if necessary
-          val ret = Try(checker.check(keySchema, valueSchema)).toEither.fold(Some(_), _ => None)
+          // if the format validation for value schema is disabled, we also disable the schema
+          // compatibility checker for value schema as well.
+          val ret = Try(
+            checker.check(keySchema, valueSchema,
+              ignoreValueSchema = !storeConf.formatValidationCheckValue)
+          ).toEither.fold(Some(_), _ => None)
           if (storeConf.stateSchemaCheckEnabled) {
             ret
           } else {
@@ -524,11 +545,22 @@ object StateStore extends Logging {
         }
       }
 
-      val provider = loadedProviders.getOrElseUpdate(
-        storeProviderId,
-        StateStoreProvider.createAndInit(
-          storeProviderId, keySchema, valueSchema, numColsPrefixKey, storeConf, hadoopConf)
-      )
+      // SPARK-42567 - Track load time for state store provider and log warning if takes longer
+      // than 2s.
+      val (provider, loadTimeMs) = Utils.timeTakenMs {
+        loadedProviders.getOrElseUpdate(
+          storeProviderId,
+          StateStoreProvider.createAndInit(
+            storeProviderId, keySchema, valueSchema, numColsPrefixKey, storeConf, hadoopConf)
+        )
+      }
+
+      if (loadTimeMs > 2000L) {
+        logWarning(s"Loaded state store provider in loadTimeMs=$loadTimeMs " +
+          s"for storeId=${storeProviderId.storeId.toString} and " +
+          s"queryRunId=${storeProviderId.queryRunId}")
+      }
+
       val otherProviderIds = loadedProviders.keys.filter(_ != storeProviderId).toSeq
       val providerIdsToUnload = reportActiveStoreInstance(storeProviderId, otherProviderIds)
       providerIdsToUnload.foreach(unload(_))
@@ -552,8 +584,17 @@ object StateStore extends Logging {
     loadedProviders.contains(storeProviderId)
   }
 
+  /** Check if maintenance thread is running and scheduled future is not done */
   def isMaintenanceRunning: Boolean = loadedProviders.synchronized {
     maintenanceTask != null && maintenanceTask.isRunning
+  }
+
+  /** Stop maintenance thread and reset the maintenance task */
+  def stopMaintenanceTask(): Unit = loadedProviders.synchronized {
+    if (maintenanceTask != null) {
+      maintenanceTask.stop()
+      maintenanceTask = null
+    }
   }
 
   /** Unload and stop all state store providers */
@@ -561,10 +602,7 @@ object StateStore extends Logging {
     loadedProviders.keySet.foreach { key => unload(key) }
     loadedProviders.clear()
     _coordRef = null
-    if (maintenanceTask != null) {
-      maintenanceTask.stop()
-      maintenanceTask = null
-    }
+    stopMaintenanceTask()
     logInfo("StateStore stopped")
   }
 
@@ -575,7 +613,15 @@ object StateStore extends Logging {
         maintenanceTask = new MaintenanceTask(
           storeConf.maintenanceInterval,
           task = { doMaintenance() },
-          onError = { loadedProviders.synchronized { loadedProviders.clear() } }
+          onError = { loadedProviders.synchronized {
+              logInfo("Stopping maintenance task since an error was encountered.")
+              stopMaintenanceTask()
+              // SPARK-44504 - Unload explicitly to force closing underlying DB instance
+              // and releasing allocated resources, especially for RocksDBStateStoreProvider.
+              loadedProviders.keySet.foreach { key => unload(key) }
+              loadedProviders.clear()
+            }
+          }
         )
         logInfo("State Store maintenance task started")
       }
@@ -592,9 +638,8 @@ object StateStore extends Logging {
     }
     loadedProviders.synchronized { loadedProviders.toSeq }.foreach { case (id, provider) =>
       try {
-        if (verifyIfStoreInstanceActive(id)) {
-          provider.doMaintenance()
-        } else {
+        provider.doMaintenance()
+        if (!verifyIfStoreInstanceActive(id)) {
           unload(id)
           logInfo(s"Unloaded $provider")
         }

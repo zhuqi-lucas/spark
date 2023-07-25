@@ -72,9 +72,10 @@ private[spark] class PipedRDD[T: ClassTag](
 
     // for compatibility with Hadoop which sets these env variables
     // so the user code can access the input filename
-    if (split.isInstanceOf[HadoopPartition]) {
-      val hadoopSplit = split.asInstanceOf[HadoopPartition]
-      currentEnvVars.putAll(hadoopSplit.getPipeEnvVars().asJava)
+    split match {
+      case hadoopSplit: HadoopPartition =>
+        currentEnvVars.putAll(hadoopSplit.getPipeEnvVars().asJava)
+      case _ => // do nothing
     }
 
     // When spark.worker.separated.working.directory option is turned on, each
@@ -185,7 +186,7 @@ private[spark] class PipedRDD[T: ClassTag](
     new Iterator[String] {
       def next(): String = {
         if (!hasNext()) {
-          throw SparkCoreErrors.noSuchElementException()
+          throw SparkCoreErrors.noSuchElementError()
         }
         lines.next()
       }

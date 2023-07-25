@@ -17,7 +17,7 @@
 
 package org.apache.spark.storage
 
-import java.io.File
+import java.io.{File, InputStream, IOException}
 import java.nio.ByteBuffer
 import java.nio.file.Files
 
@@ -26,13 +26,15 @@ import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.{Future, TimeoutException}
 import scala.concurrent.duration._
-import scala.language.{implicitConversions, postfixOps}
+import scala.language.implicitConversions
 import scala.reflect.ClassTag
+import scala.reflect.classTag
 
+import com.esotericsoftware.kryo.KryoException
 import org.apache.commons.lang3.RandomUtils
 import org.mockito.{ArgumentCaptor, ArgumentMatchers => mc}
 import org.mockito.Mockito.{doAnswer, mock, never, spy, times, verify, when}
-import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach, PrivateMethodTester}
+import org.scalatest.PrivateMethodTester
 import org.scalatest.concurrent.{Signaler, ThreadSignaler, TimeLimits}
 import org.scalatest.concurrent.Eventually._
 import org.scalatest.matchers.must.Matchers
@@ -43,6 +45,7 @@ import org.apache.spark.broadcast.BroadcastManager
 import org.apache.spark.executor.DataReadMethod
 import org.apache.spark.internal.config
 import org.apache.spark.internal.config._
+import org.apache.spark.internal.config.Kryo.{KRYO_USE_POOL, KRYO_USE_UNSAFE}
 import org.apache.spark.internal.config.Tests._
 import org.apache.spark.memory.{MemoryMode, UnifiedMemoryManager}
 import org.apache.spark.network.{BlockDataManager, BlockTransferService, TransportContext}
@@ -57,16 +60,15 @@ import org.apache.spark.rpc.{RpcCallContext, RpcEndpoint, RpcEnv}
 import org.apache.spark.scheduler.{LiveListenerBus, MapStatus, MergeStatus, SparkListenerBlockUpdated}
 import org.apache.spark.scheduler.cluster.{CoarseGrainedClusterMessages, CoarseGrainedSchedulerBackend}
 import org.apache.spark.security.{CryptoStreamUtils, EncryptionFunSuite}
-import org.apache.spark.serializer.{JavaSerializer, KryoSerializer, SerializerManager}
+import org.apache.spark.serializer.{DeserializationStream, JavaSerializer, KryoDeserializationStream, KryoSerializer, KryoSerializerInstance, SerializerInstance, SerializerManager}
 import org.apache.spark.shuffle.{MigratableResolver, ShuffleBlockInfo, ShuffleBlockResolver, ShuffleManager}
 import org.apache.spark.shuffle.sort.SortShuffleManager
 import org.apache.spark.storage.BlockManagerMessages._
 import org.apache.spark.util._
 import org.apache.spark.util.io.ChunkedByteBuffer
 
-class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterEach
-  with PrivateMethodTester with LocalSparkContext with ResetSystemProperties
-  with EncryptionFunSuite with TimeLimits with BeforeAndAfterAll {
+class BlockManagerSuite extends SparkFunSuite with Matchers with PrivateMethodTester
+  with LocalSparkContext with ResetSystemProperties with EncryptionFunSuite with TimeLimits {
 
   import BlockManagerSuite._
 
@@ -98,11 +100,12 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
       .set(IS_TESTING, true)
       .set(MEMORY_FRACTION, 1.0)
       .set(MEMORY_STORAGE_FRACTION, 0.999)
+      .set(SERIALIZER, "org.apache.spark.serializer.KryoSerializer")
       .set(Kryo.KRYO_SERIALIZER_BUFFER_SIZE.key, "1m")
       .set(STORAGE_UNROLL_MEMORY_THRESHOLD, 512L)
       .set(Network.RPC_ASK_TIMEOUT, "5s")
       .set(PUSH_BASED_SHUFFLE_ENABLED, true)
-      .set(STORAGE_BLOCKMANAGER_HEARTBEAT_TIMEOUT.key, "5s")
+      .set(RDD_CACHE_VISIBILITY_TRACKING_ENABLED, true)
   }
 
   private def makeSortShuffleManager(conf: Option[SparkConf] = None): SortShuffleManager = {
@@ -128,10 +131,10 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
       None
     }
     val bmSecurityMgr = new SecurityManager(bmConf, encryptionKey)
-    val transfer = transferService
-      .getOrElse(new NettyBlockTransferService(conf, securityMgr, "localhost", "localhost", 0, 1))
-    val memManager = UnifiedMemoryManager(bmConf, numCores = 1)
     val serializerManager = new SerializerManager(serializer, bmConf)
+    val transfer = transferService.getOrElse(new NettyBlockTransferService(
+      conf, securityMgr, serializerManager, "localhost", "localhost", 0, 1))
+    val memManager = UnifiedMemoryManager(bmConf, numCores = 1)
     val externalShuffleClient = if (conf.get(config.SHUFFLE_SERVICE_ENABLED)) {
       val transConf = SparkTransportConf.fromSparkConf(conf, "shuffle", 0)
       Some(new ExternalBlockStoreClient(transConf, bmSecurityMgr,
@@ -183,10 +186,11 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
     when(sc.conf).thenReturn(conf)
 
     val blockManagerInfo = new mutable.HashMap[BlockManagerId, BlockManagerInfo]()
-    liveListenerBus = spy(new LiveListenerBus(conf))
-    master = spy(new BlockManagerMaster(rpcEnv.setupEndpoint("blockmanager",
+    liveListenerBus = spy[LiveListenerBus](new LiveListenerBus(conf))
+    master = spy[BlockManagerMaster](new BlockManagerMaster(rpcEnv.setupEndpoint("blockmanager",
       new BlockManagerMasterEndpoint(rpcEnv, true, conf,
-        liveListenerBus, None, blockManagerInfo, mapOutputTracker)),
+        liveListenerBus, None, blockManagerInfo, mapOutputTracker, shuffleManager,
+        isDriver = true)),
       rpcEnv.setupEndpoint("blockmanagerHeartbeat",
       new BlockManagerMasterHeartbeatEndpoint(rpcEnv, true, blockManagerInfo)), conf, true))
   }
@@ -293,7 +297,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
     eventually(timeout(5.seconds)) {
       // make sure both bm1 and bm2 are registered at driver side BlockManagerMaster
       verify(master, times(2))
-        .registerBlockManager(mc.any(), mc.any(), mc.any(), mc.any(), mc.any())
+        .registerBlockManager(mc.any(), mc.any(), mc.any(), mc.any(), mc.any(), mc.any())
       assert(driverEndpoint.askSync[Boolean](
         CoarseGrainedClusterMessages.IsExecutorAlive(bm1Id.executorId)))
       assert(driverEndpoint.askSync[Boolean](
@@ -357,6 +361,44 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
     master.removeRdd(0, true)
     master.removeBroadcast(0, true, true)
     master.removeShuffle(0, true)
+  }
+
+  test("SPARK-41360: Avoid block manager re-registration if the executor has been lost") {
+    // Set up a DriverEndpoint which always returns isExecutorAlive=false
+    rpcEnv.setupEndpoint(CoarseGrainedSchedulerBackend.ENDPOINT_NAME,
+      new RpcEndpoint {
+        override val rpcEnv: RpcEnv = BlockManagerSuite.this.rpcEnv
+
+        override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
+          case CoarseGrainedClusterMessages.RegisterExecutor(executorId, _, _, _, _, _, _, _) =>
+            context.reply(true)
+          case CoarseGrainedClusterMessages.IsExecutorAlive(executorId) =>
+            // always return false
+            context.reply(false)
+        }
+      }
+    )
+
+    // Set up a block manager endpoint and endpoint reference
+    val bmRef = rpcEnv.setupEndpoint(s"bm-0", new RpcEndpoint {
+      override val rpcEnv: RpcEnv = BlockManagerSuite.this.rpcEnv
+
+      private def reply[T](context: RpcCallContext, response: T): Unit = {
+        context.reply(response)
+      }
+
+      override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
+        case RemoveRdd(_) => reply(context, 1)
+        case RemoveBroadcast(_, _) => reply(context, 1)
+        case RemoveShuffle(_) => reply(context, true)
+      }
+    })
+    val bmId = BlockManagerId(s"exec-0", "localhost", 1234, None)
+    // Register the block manager with isReRegister = true
+    val updatedId = master.registerBlockManager(
+      bmId, Array.empty, 2000, 0, bmRef, isReRegister = true)
+    // The re-registration should fail since the executor is considered as dead by DriverEndpoint
+    assert(updatedId.executorId === BlockManagerId.INVALID_EXECUTOR_ID)
   }
 
   test("StorageLevel object caching") {
@@ -645,7 +687,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
       mc.eq(StorageLevel.NONE), mc.anyInt(), mc.anyInt())
   }
 
-  test("no reregistration on heart beat until executor timeout") {
+  test("reregistration on heart beat") {
     val store = makeBlockManager(2000)
     val a1 = new Array[Byte](400)
 
@@ -656,15 +698,10 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
 
     master.removeExecutor(store.blockManagerId.executorId)
     assert(master.getLocations("a1").size == 0, "a1 was not removed from master")
+
     val reregister = !master.driverHeartbeatEndPoint.askSync[Boolean](
       BlockManagerHeartbeat(store.blockManagerId))
-    assert(reregister == false, "master told to re-register")
-
-    eventually(timeout(10 seconds), interval(1 seconds)) {
-      val reregister = !master.driverHeartbeatEndPoint.askSync[Boolean](
-        BlockManagerHeartbeat(store.blockManagerId))
-      assert(reregister, "master did not tell to re-register")
-    }
+    assert(reregister)
   }
 
   test("reregistration on block update") {
@@ -672,17 +709,27 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
     val a1 = new Array[Byte](400)
     val a2 = new Array[Byte](400)
 
+    // Set up a DriverEndpoint which simulates the executor is alive (required by SPARK-41360)
+    rpcEnv.setupEndpoint(CoarseGrainedSchedulerBackend.ENDPOINT_NAME,
+      new RpcEndpoint {
+        override val rpcEnv: RpcEnv = BlockManagerSuite.this.rpcEnv
+
+        override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
+          case CoarseGrainedClusterMessages.IsExecutorAlive(executorId) =>
+            if (executorId == store.blockManagerId.executorId) {
+              context.reply(true)
+            } else {
+              context.reply(false)
+            }
+        }
+      }
+    )
+
     store.putSingle("a1", a1, StorageLevel.MEMORY_ONLY)
     assert(master.getLocations("a1").size > 0, "master was not told about a1")
 
     master.removeExecutor(store.blockManagerId.executorId)
     assert(master.getLocations("a1").size == 0, "a1 was not removed from master")
-
-    eventually(timeout(10 seconds), interval(1 seconds)) {
-      val reregister = !master.driverHeartbeatEndPoint.askSync[Boolean](
-        BlockManagerHeartbeat(store.blockManagerId))
-      assert(reregister, "master did not tell to re-register")
-    }
 
     store.putSingle("a2", a2, StorageLevel.MEMORY_ONLY)
     store.waitForAsyncReregister()
@@ -826,7 +873,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
       conf.set("spark.shuffle.io.maxRetries", "0")
       val sameHostBm = makeBlockManager(8000, "sameHost", master)
 
-      val otherHostTransferSrv = spy(sameHostBm.blockTransferService)
+      val otherHostTransferSrv = spy[BlockTransferService](sameHostBm.blockTransferService)
       doAnswer { _ =>
          "otherHost"
       }.when(otherHostTransferSrv).hostName
@@ -841,7 +888,7 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
       val blockId = "list"
       bmToPutBlock.putIterator(blockId, List(array).iterator, storageLevel, tellMaster = true)
 
-      val sameHostTransferSrv = spy(sameHostBm.blockTransferService)
+      val sameHostTransferSrv = spy[BlockTransferService](sameHostBm.blockTransferService)
       doAnswer { _ =>
          fail("Fetching over network is not expected when the block is requested from same host")
       }.when(sameHostTransferSrv).fetchBlockSync(mc.any(), mc.any(), mc.any(), mc.any(), mc.any())
@@ -888,14 +935,15 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
         }
       }
       val store1 = makeBlockManager(8000, "executor1", this.master, Some(mockTransferService))
-      val spiedStore1 = spy(store1)
+      val spiedStore1 = spy[BlockManager](store1)
       doAnswer { inv =>
         val blockId = inv.getArguments()(0).asInstanceOf[BlockId]
         val localDirs = inv.getArguments()(1).asInstanceOf[Array[String]]
         val blockSize = inv.getArguments()(2).asInstanceOf[Long]
         val res = store1.readDiskBlockFromSameHostExecutor(blockId, localDirs, blockSize)
         assert(res.isDefined)
-        val file = ExecutorDiskUtils.getFile(localDirs, store1.subDirsPerLocalDir, blockId.name)
+        val file = new File(
+          ExecutorDiskUtils.getFilePath(localDirs, store1.subDirsPerLocalDir, blockId.name))
         // delete the file behind the blockId
         assert(file.delete())
         sameHostExecutorTried = true
@@ -926,13 +974,17 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
   }
 
   test("SPARK-14252: getOrElseUpdate should still read from remote storage") {
-    val store = makeBlockManager(8000, "executor1")
+    val store = spy[BlockManager](makeBlockManager(8000, "executor1"))
     val store2 = makeBlockManager(8000, "executor2")
     val list1 = List(new Array[Byte](4000))
+    val blockId = RDDBlockId(0, 0)
     store2.putIterator(
-      "list1", list1.iterator, StorageLevel.MEMORY_ONLY, tellMaster = true)
-    assert(store.getOrElseUpdate(
-      "list1",
+      blockId, list1.iterator, StorageLevel.MEMORY_ONLY, tellMaster = true)
+
+    doAnswer { _ => true }.when(store).isRDDBlockVisible(mc.any())
+    assert(store.getOrElseUpdateRDDBlock(
+      0L,
+      blockId,
       StorageLevel.MEMORY_ONLY,
       ClassTag.Any,
       () => fail("attempted to compute locally")).isLeft)
@@ -1256,9 +1308,10 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
   test("block store put failure") {
     // Use Java serializer so we can create an unserializable error.
     conf.set(TEST_MEMORY, 1200L)
-    val transfer = new NettyBlockTransferService(conf, securityMgr, "localhost", "localhost", 0, 1)
-    val memoryManager = UnifiedMemoryManager(conf, numCores = 1)
     val serializerManager = new SerializerManager(new JavaSerializer(conf), conf)
+    val transfer = new NettyBlockTransferService(
+      conf, securityMgr, serializerManager, "localhost", "localhost", 0, 1)
+    val memoryManager = UnifiedMemoryManager(conf, numCores = 1)
     val store = new BlockManager(SparkContext.DRIVER_IDENTIFIER, rpcEnv, master,
       serializerManager, conf, memoryManager, mapOutputTracker,
       shuffleManager, transfer, securityMgr, None)
@@ -1305,8 +1358,8 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
         if (conf.get(IO_ENCRYPTION_ENABLED)) Some(CryptoStreamUtils.createKey(conf)) else None
       val securityMgr = new SecurityManager(conf, ioEncryptionKey)
       val serializerManager = new SerializerManager(serializer, conf, ioEncryptionKey)
-      val transfer =
-        new NettyBlockTransferService(conf, securityMgr, "localhost", "localhost", 0, 1)
+      val transfer = new NettyBlockTransferService(
+        conf, securityMgr, serializerManager, "localhost", "localhost", 0, 1)
       val memoryManager = UnifiedMemoryManager(conf, numCores = 1)
       val blockManager = new BlockManager(SparkContext.DRIVER_IDENTIFIER, rpcEnv, master,
         serializerManager, conf, memoryManager, mapOutputTracker,
@@ -2134,6 +2187,277 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
     store.putSingle(broadcast0BlockId, a, StorageLevel.DISK_ONLY)
   }
 
+  test("check KryoException when getting disk blocks and 'Input/output error' is occurred") {
+    val kryoSerializerWithDiskCorruptedInputStream
+      = createKryoSerializerWithDiskCorruptedInputStream()
+
+    case class User(id: Long, name: String)
+
+    conf.set(TEST_MEMORY, 1200L)
+    val serializerManager = new SerializerManager(kryoSerializerWithDiskCorruptedInputStream, conf)
+    val transfer = new NettyBlockTransferService(
+      conf, securityMgr, serializerManager, "localhost", "localhost", 0, 1)
+    val memoryManager = UnifiedMemoryManager(conf, numCores = 1)
+    val store = new BlockManager(SparkContext.DRIVER_IDENTIFIER, rpcEnv, master,
+      serializerManager, conf, memoryManager, mapOutputTracker,
+      shuffleManager, transfer, securityMgr, None)
+    allStores += store
+    store.initialize("app-id")
+    store.putSingle("my-block-id", new Array[User](300), StorageLevel.MEMORY_AND_DISK)
+
+    val kryoException = intercept[KryoException] {
+      store.get("my-block-id")
+    }
+    assert(kryoException.getMessage === "java.io.IOException: Input/output error")
+    assertUpdateBlockInfoReportedForRemovingBlock(store, "my-block-id",
+      removedFromMemory = false, removedFromDisk = true)
+  }
+
+  test("check KryoException when saving blocks into memory and 'Input/output error' is occurred") {
+    val kryoSerializerWithDiskCorruptedInputStream
+      = createKryoSerializerWithDiskCorruptedInputStream()
+
+    conf.set(TEST_MEMORY, 1200L)
+    val serializerManager = new SerializerManager(kryoSerializerWithDiskCorruptedInputStream, conf)
+    val transfer = new NettyBlockTransferService(
+      conf, securityMgr, serializerManager, "localhost", "localhost", 0, 1)
+    val memoryManager = UnifiedMemoryManager(conf, numCores = 1)
+    val store = new BlockManager(SparkContext.DRIVER_IDENTIFIER, rpcEnv, master,
+      serializerManager, conf, memoryManager, mapOutputTracker,
+      shuffleManager, transfer, securityMgr, None)
+    allStores += store
+    store.initialize("app-id")
+
+    val blockId = RDDBlockId(0, 0)
+    val bytes = Array.tabulate[Byte](1000)(_.toByte)
+    val byteBuffer = new ChunkedByteBuffer(ByteBuffer.wrap(bytes))
+
+    val kryoException = intercept[KryoException] {
+      store.putBytes(blockId, byteBuffer, StorageLevel.MEMORY_AND_DISK)
+    }
+    assert(kryoException.getMessage === "java.io.IOException: Input/output error")
+  }
+
+  test("SPARK-39647: Failure to register with ESS should prevent registering the BM") {
+    val handler = new NoOpRpcHandler {
+      override def receive(
+          client: TransportClient,
+          message: ByteBuffer,
+          callback: RpcResponseCallback): Unit = {
+        val msgObj = BlockTransferMessage.Decoder.fromByteBuffer(message)
+        msgObj match {
+          case _: RegisterExecutor => () // No reply to generate client-side timeout
+        }
+      }
+    }
+    val transConf = SparkTransportConf.fromSparkConf(conf, "shuffle")
+    Utils.tryWithResource(new TransportContext(transConf, handler, true)) { transCtx =>
+      def newShuffleServer(port: Int): (TransportServer, Int) = {
+        (transCtx.createServer(port, Seq.empty[TransportServerBootstrap].asJava), port)
+      }
+
+      val candidatePort = RandomUtils.nextInt(1024, 65536)
+      val (server, shufflePort) = Utils.startServiceOnPort(candidatePort,
+        newShuffleServer, conf, "ShuffleServer")
+
+      conf.set(SHUFFLE_SERVICE_ENABLED.key, "true")
+      conf.set(SHUFFLE_SERVICE_PORT.key, shufflePort.toString)
+      conf.set(SHUFFLE_REGISTRATION_TIMEOUT.key, "40")
+      conf.set(SHUFFLE_REGISTRATION_MAX_ATTEMPTS.key, "1")
+      val e = intercept[SparkException] {
+        makeBlockManager(8000, "timeoutExec")
+      }.getMessage
+      assert(e.contains("TimeoutException"))
+      verify(master, times(0))
+        .registerBlockManager(mc.any(), mc.any(), mc.any(), mc.any(), mc.any(), mc.any())
+      server.close()
+    }
+  }
+
+  test("SPARK-41497: getOrElseUpdateRDDBlock do compute based on cache visibility statue") {
+    val store = makeBlockManager(8000, "executor1")
+    val blockId = RDDBlockId(rddId = 1, splitIndex = 1)
+    var computed: Boolean = false
+    val data = Seq(1, 2, 3)
+    val makeIterator = () => {
+      computed = true
+      data.iterator
+    }
+
+    // Cache doesn't exist and is not visible.
+    assert(store.getStatus(blockId).isEmpty && !store.isRDDBlockVisible(blockId))
+    val res1 = store.getOrElseUpdateRDDBlock(
+      1, blockId, StorageLevel.MEMORY_ONLY, classTag[Int], makeIterator)
+    // Put cache successfully and reported block task info.
+    assert(res1.isLeft && computed)
+    verify(master, times(1)).updateRDDBlockTaskInfo(blockId, 1)
+    assert(store.getStatus(blockId).nonEmpty && !store.isRDDBlockVisible(blockId))
+
+    // Cache exists but not visible.
+    computed = false
+    val res2 = store.getOrElseUpdateRDDBlock(
+      1, blockId, StorageLevel.MEMORY_ONLY, classTag[Int], makeIterator)
+    // Load cache successfully and reported block task info.
+    assert(res2.isLeft && computed)
+    assert(!store.isRDDBlockVisible(blockId))
+    verify(master, times(2)).updateRDDBlockTaskInfo(blockId, 1)
+
+    // Cache exists and visible.
+    store.blockInfoManager.tryMarkBlockAsVisible(blockId)
+    computed = false
+    assert(store.getStatus(blockId).nonEmpty && store.isRDDBlockVisible(blockId))
+    val res3 = store.getOrElseUpdateRDDBlock(
+      1, blockId, StorageLevel.MEMORY_ONLY, classTag[Int], makeIterator)
+    // Load cache successfully but not report block task info.
+    assert(res3.isLeft && !computed)
+    verify(master, times(2)).updateRDDBlockTaskInfo(blockId, 1)
+  }
+
+
+  test("SPARK-41497: mark rdd block as visible") {
+    val store = makeBlockManager(8000, "executor1")
+    val blockId = RDDBlockId(rddId = 1, splitIndex = 1)
+    val data = Seq(1, 2, 3)
+    store.putIterator(blockId, data.iterator, StorageLevel.MEMORY_ONLY, tellMaster = true)
+    assert(store.getStatus(blockId).nonEmpty)
+    assert(!store.blockInfoManager.isRDDBlockVisible(blockId))
+    assert(store.blockInfoManager.containsInvisibleRDDBlock(blockId))
+
+    // Mark rdd block as visible.
+    store.blockInfoManager.tryMarkBlockAsVisible(blockId)
+    assert(store.blockInfoManager.isRDDBlockVisible(blockId))
+    assert(!store.blockInfoManager.containsInvisibleRDDBlock(blockId))
+
+    // Cache the block again should not change the visibility status.
+    store.putIterator(blockId, data.iterator, StorageLevel.MEMORY_ONLY, tellMaster = true)
+    assert(store.blockInfoManager.isRDDBlockVisible(blockId))
+    assert(!store.blockInfoManager.containsInvisibleRDDBlock(blockId))
+
+    // Remove rdd block.
+    store.removeBlock(blockId)
+    assert(!store.blockInfoManager.isRDDBlockVisible(blockId))
+    assert(!store.blockInfoManager.containsInvisibleRDDBlock(blockId))
+
+    // Visibility status should not be added once rdd is removed.
+    store.blockInfoManager.tryMarkBlockAsVisible(blockId)
+    assert(!store.blockInfoManager.isRDDBlockVisible(blockId))
+    assert(!store.blockInfoManager.containsInvisibleRDDBlock(blockId))
+  }
+
+
+  test("SPARK-41497: master & manager interaction about rdd block visibility information") {
+    val store1 = makeBlockManager(8000, "executor1")
+    val store2 = makeBlockManager(8000, "executor2")
+    val store3 = makeBlockManager(8000, "executor3")
+
+    val taskId = 0L
+    val blockId = RDDBlockId(rddId = 1, splitIndex = 1)
+    val data = Seq(1, 2, 3)
+
+    store1.getOrElseUpdateRDDBlock(
+      taskId, blockId, StorageLevel.MEMORY_ONLY, classTag[Int], () => data.iterator)
+    // Block information is reported and block is not visible.
+    assert(master.getLocations(blockId).nonEmpty)
+    assert(!master.isRDDBlockVisible(blockId))
+    assert(store1.blockInfoManager.containsInvisibleRDDBlock(blockId))
+
+    // A copy is reported, visibility status not changed.
+    store2.putIterator(blockId, data.iterator, StorageLevel.MEMORY_ONLY)
+    assert(master.getLocations(blockId).length === 2)
+    assert(!master.isRDDBlockVisible(blockId))
+    assert(store2.blockInfoManager.containsInvisibleRDDBlock(blockId))
+
+    // Report rdd block visibility as true, driver should ask block managers to mark the block
+    // as visible.
+    master.updateRDDBlockVisibility(taskId, visible = true)
+    eventually(timeout(5.seconds)) {
+      assert(master.isRDDBlockVisible(blockId))
+      assert(store1.blockInfoManager.isRDDBlockVisible(blockId))
+      assert(store2.blockInfoManager.isRDDBlockVisible(blockId))
+    }
+
+    // Visibility status should be updated right after block reported since it's already visible.
+    assert(!store3.blockInfoManager.isRDDBlockVisible(blockId))
+    store3.putIterator(blockId, data.iterator, StorageLevel.MEMORY_ONLY)
+    eventually(timeout(5.seconds)) {
+      assert(store3.blockInfoManager.isRDDBlockVisible(blockId))
+    }
+  }
+
+
+  test("SPARK-41497: rdd block's visibility status should be cached once got from driver") {
+    val store = makeBlockManager(8000, "executor1")
+    val taskId = 0L
+    val blockId = RDDBlockId(rddId = 1, splitIndex = 1)
+    val data = Seq(1, 2, 3)
+
+    store.getOrElseUpdateRDDBlock(
+      taskId, blockId, StorageLevel.MEMORY_ONLY, classTag[Int], () => data.iterator)
+    // Block information is reported and block is not visible.
+    assert(master.getLocations(blockId).nonEmpty)
+    assert(!master.isRDDBlockVisible(blockId))
+    assert(store.blockInfoManager.containsInvisibleRDDBlock(blockId))
+
+    doAnswer(_ => true).when(master).isRDDBlockVisible(mc.any())
+    // Visibility status should be cached.
+    assert(store.isRDDBlockVisible(blockId))
+    assert(!store.blockInfoManager.containsInvisibleRDDBlock(blockId))
+    assert(store.blockInfoManager.isRDDBlockVisible(blockId))
+  }
+
+  test("SPARK-41497: getOrElseUpdateRDDBlock should make sure accumulators updated when block" +
+    " already exist but still not visible") {
+    val store = makeBlockManager(8000, "executor1")
+    val taskId = 0L
+    val blockId = RDDBlockId(rddId = 1, splitIndex = 1)
+    val data = Seq(1, 2, 3)
+    val acc = new LongAccumulator
+    val makeIterator = () => {
+      data.iterator.map { x =>
+        acc.add(1)
+        x
+      }
+    }
+
+    store.getOrElseUpdateRDDBlock(
+      taskId, blockId, StorageLevel.MEMORY_ONLY, classTag[Int], makeIterator)
+    // Block cached but not visible.
+    assert(master.getLocations(blockId).nonEmpty)
+    assert(!master.isRDDBlockVisible(blockId))
+    assert(acc.value === 3)
+
+    store.getOrElseUpdateRDDBlock(
+      taskId, blockId, StorageLevel.MEMORY_ONLY, classTag[Int], makeIterator)
+    // Accumulator should be updated even though block already exists.
+    assert(acc.value === 6)
+  }
+
+  private def createKryoSerializerWithDiskCorruptedInputStream(): KryoSerializer = {
+    class TestDiskCorruptedInputStream extends InputStream {
+      override def read(): Int = throw new IOException("Input/output error")
+    }
+
+    class TestKryoDeserializationStream(serInstance: KryoSerializerInstance,
+                                        inStream: InputStream,
+                                        useUnsafe: Boolean)
+      extends KryoDeserializationStream(serInstance, inStream, useUnsafe)
+
+    class TestKryoSerializerInstance(ks: KryoSerializer, useUnsafe: Boolean, usePool: Boolean)
+      extends KryoSerializerInstance(ks, useUnsafe, usePool) {
+      override def deserializeStream(s: InputStream): DeserializationStream = {
+        new TestKryoDeserializationStream(this, new TestDiskCorruptedInputStream(), false)
+      }
+    }
+
+    class TestKryoSerializer(conf: SparkConf) extends KryoSerializer(conf) {
+      override def newInstance(): SerializerInstance = {
+        new TestKryoSerializerInstance(this, conf.get(KRYO_USE_UNSAFE), conf.get(KRYO_USE_POOL))
+      }
+    }
+
+    new TestKryoSerializer(conf)
+  }
+
   class MockBlockTransferService(
       val maxFailures: Int,
       override val hostName: String = "MockBlockTransferServiceHost") extends BlockTransferService {
@@ -2164,7 +2488,9 @@ class BlockManagerSuite extends SparkFunSuite with Matchers with BeforeAndAfterE
         blockData: ManagedBuffer,
         level: StorageLevel,
         classTag: ClassTag[_]): Future[Unit] = {
+      // scalastyle:off executioncontextglobal
       import scala.concurrent.ExecutionContext.Implicits.global
+      // scalastyle:on executioncontextglobal
       Future {}
     }
 

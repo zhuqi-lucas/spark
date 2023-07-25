@@ -21,20 +21,26 @@
   <parent>
     <groupId>org.apache.spark</groupId>
     <artifactId>spark-parent_2.12</artifactId>
-    <version>3.3.0-SNAPSHOT</version>
+    <version>4.0.0-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
   <artifactId>spark-core_2.12</artifactId>
   <packaging>jar</packaging>
   <name>Spark Project Core</name>
-  <url>http://spark.apache.org/</url>
+  <url>https://spark.apache.org/</url>
 
   <properties>
     <sbt.project.name>core</sbt.project.name>
   </properties>
   
   <dependencies>
+    <!-- #if scala-2.13 --><!--
+    <dependency>
+      <groupId>org.scala-lang.modules</groupId>
+      <artifactId>scala-parallel-collections_${scala.binary.version}</artifactId>
+    </dependency>
+    --><!-- #endif scala-2.13 -->
     <dependency>
       <groupId>org.apache.avro</groupId>
       <artifactId>avro</artifactId>
@@ -56,17 +62,22 @@
       <artifactId>chill-java</artifactId>
     </dependency>
     <dependency>
+      <groupId>com.github.jnr</groupId>
+      <artifactId>jnr-posix</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
       <groupId>org.apache.xbean</groupId>
       <artifactId>xbean-asm9-shaded</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.hadoop</groupId>
-      <artifactId>${hadoop-client-api.artifact}</artifactId>
+      <artifactId>hadoop-client-api</artifactId>
       <version>${hadoop.version}</version>
     </dependency>
     <dependency>
       <groupId>org.apache.hadoop</groupId>
-      <artifactId>${hadoop-client-runtime.artifact}</artifactId>
+      <artifactId>hadoop-client-runtime</artifactId>
       <version>${hadoop.version}</version>
     </dependency>
     <dependency>
@@ -92,6 +103,11 @@
     <dependency>
       <groupId>org.apache.spark</groupId>
       <artifactId>spark-unsafe_${scala.binary.version}</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-common-utils_${scala.binary.version}</artifactId>
       <version>${project.version}</version>
     </dependency>
     <dependency>
@@ -172,6 +188,10 @@
     </dependency>
     <dependency>
       <groupId>org.apache.commons</groupId>
+      <artifactId>commons-compress</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
       <artifactId>commons-lang3</artifactId>
     </dependency>
     <dependency>
@@ -191,29 +211,14 @@
       <artifactId>commons-collections</artifactId>
     </dependency>
     <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-collections4</artifactId>
+    </dependency>
+    <dependency>
       <groupId>com.google.code.findbugs</groupId>
       <artifactId>jsr305</artifactId>
     </dependency>
-    <dependency>
-      <groupId>org.slf4j</groupId>
-      <artifactId>slf4j-api</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.slf4j</groupId>
-      <artifactId>jul-to-slf4j</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.slf4j</groupId>
-      <artifactId>jcl-over-slf4j</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>log4j</groupId>
-      <artifactId>log4j</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.slf4j</groupId>
-      <artifactId>slf4j-log4j12</artifactId>
-    </dependency>
+
     <dependency>
       <groupId>com.ning</groupId>
       <artifactId>compress-lzf</artifactId>
@@ -233,10 +238,6 @@
     <dependency>
       <groupId>org.roaringbitmap</groupId>
       <artifactId>RoaringBitmap</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>commons-net</groupId>
-      <artifactId>commons-net</artifactId>
     </dependency>
     <dependency>
       <groupId>org.scala-lang.modules</groupId>
@@ -283,10 +284,32 @@
       <artifactId>jersey-test-framework-provider-simple</artifactId>
       <scope>test</scope>
     </dependency>
+    <!-- Netty Begin -->
     <dependency>
       <groupId>io.netty</groupId>
       <artifactId>netty-all</artifactId>
     </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-transport-native-epoll</artifactId>
+      <classifier>linux-x86_64</classifier>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-transport-native-epoll</artifactId>
+      <classifier>linux-aarch_64</classifier>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-transport-native-kqueue</artifactId>
+      <classifier>osx-aarch_64</classifier>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-transport-native-kqueue</artifactId>
+      <classifier>osx-x86_64</classifier>
+    </dependency>
+    <!-- Netty End -->
     <dependency>
       <groupId>com.clearspring.analytics</groupId>
       <artifactId>stream</artifactId>
@@ -384,16 +407,6 @@
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>org.hamcrest</groupId>
-      <artifactId>hamcrest-core</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.hamcrest</groupId>
-      <artifactId>hamcrest-library</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
       <groupId>org.mockito</groupId>
       <artifactId>mockito-core</artifactId>
       <scope>test</scope>
@@ -415,19 +428,13 @@
     </dependency>
     <dependency>
       <groupId>net.razorvine</groupId>
-      <artifactId>pyrolite</artifactId>
-      <version>4.30</version>
-      <exclusions>
-        <exclusion>
-          <groupId>net.razorvine</groupId>
-          <artifactId>serpent</artifactId>
-        </exclusion>
-      </exclusions>
+      <artifactId>pickle</artifactId>
+      <version>1.3</version>
     </dependency>
     <dependency>
       <groupId>net.sf.py4j</groupId>
       <artifactId>py4j</artifactId>
-      <version>0.10.9.2</version>
+      <version>0.10.9.7</version>
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
@@ -475,14 +482,6 @@
           <artifactId>commons-logging</artifactId>
         </exclusion>
         <exclusion>
-          <groupId>org.codehaus.jackson</groupId>
-          <artifactId>jackson-mapper-asl</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>org.codehaus.jackson</groupId>
-          <artifactId>jackson-core-asl</artifactId>
-        </exclusion>
-        <exclusion>
           <groupId>com.fasterxml.jackson.core</groupId>
           <artifactId>jackson-core</artifactId>
         </exclusion>
@@ -505,7 +504,11 @@
       <groupId>org.apache.commons</groupId>
       <artifactId>commons-crypto</artifactId>
     </dependency>
-
+    <dependency>
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java</artifactId>
+      <scope>compile</scope>
+    </dependency>
   </dependencies>
   <build>
     <outputDirectory>target/scala-${scala.binary.version}/classes</outputDirectory>
@@ -526,12 +529,42 @@
         <artifactId>maven-antrun-plugin</artifactId>
         <executions>
           <execution>
+            <id>choose-shell-and-script</id>
+            <phase>validate</phase>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <configuration>
+              <exportAntProperties>true</exportAntProperties>
+              <target>
+                <condition property="shell" value="powershell.exe" else="bash">
+                  <and>
+                    <os family="windows"/>
+                  </and>
+                </condition>
+                <condition property="spark-build-info-script" value="spark-build-info.ps1"
+                           else="spark-build-info">
+                  <and>
+                    <os family="windows"/>
+                  </and>
+                </condition>
+                <echo>Shell to use for generating spark-version-info.properties file =
+                  ${shell}
+                </echo>
+                <echo>Script to use for generating spark-version-info.properties file =
+                  ${spark-build-info-script}
+                </echo>
+              </target>
+            </configuration>
+          </execution>
+          <execution>
+            <id>generate-spark-build-info</id>
             <phase>generate-resources</phase>
             <configuration>
               <!-- Execute the shell script to generate the spark build information. -->
               <target>
-                <exec executable="bash">
-                  <arg value="${project.basedir}/../build/spark-build-info"/>
+                <exec executable="${shell}">
+                  <arg value="${project.basedir}/../build/${spark-build-info-script}"/>
                   <arg value="${project.build.directory}/extra-resources"/>
                   <arg value="${project.version}"/>
                 </exec>
@@ -564,7 +597,7 @@
               <overWriteIfNewer>true</overWriteIfNewer>
               <useSubDirectoryPerType>true</useSubDirectoryPerType>
               <includeArtifactIds>
-                guava,jetty-io,jetty-servlet,jetty-servlets,jetty-continuation,jetty-http,jetty-plus,jetty-util,jetty-server,jetty-security,jetty-proxy,jetty-client
+                guava,protobuf-java,jetty-io,jetty-servlet,jetty-servlets,jetty-continuation,jetty-http,jetty-plus,jetty-util,jetty-server,jetty-security,jetty-proxy,jetty-client
               </includeArtifactIds>
               <silent>true</silent>
             </configuration>
@@ -588,6 +621,52 @@
             </configuration>
           </execution>
         </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <configuration>
+          <shadedArtifactAttached>false</shadedArtifactAttached>
+          <shadeTestJar>true</shadeTestJar>
+          <artifactSet>
+            <includes>
+              <include>org.spark-project.spark:unused</include>
+              <include>org.eclipse.jetty:jetty-io</include>
+              <include>org.eclipse.jetty:jetty-http</include>
+              <include>org.eclipse.jetty:jetty-proxy</include>
+              <include>org.eclipse.jetty:jetty-client</include>
+              <include>org.eclipse.jetty:jetty-continuation</include>
+              <include>org.eclipse.jetty:jetty-servlet</include>
+              <include>org.eclipse.jetty:jetty-servlets</include>
+              <include>org.eclipse.jetty:jetty-plus</include>
+              <include>org.eclipse.jetty:jetty-security</include>
+              <include>org.eclipse.jetty:jetty-util</include>
+              <include>org.eclipse.jetty:jetty-server</include>
+              <include>com.google.guava:guava</include>
+              <include>com.google.protobuf:*</include>
+            </includes>
+          </artifactSet>
+          <relocations>
+            <relocation>
+              <pattern>org.eclipse.jetty</pattern>
+              <shadedPattern>${spark.shade.packageName}.jetty</shadedPattern>
+              <includes>
+                <include>org.eclipse.jetty.**</include>
+              </includes>
+            </relocation>
+            <relocation>
+              <pattern>com.google.common</pattern>
+              <shadedPattern>${spark.shade.packageName}.guava</shadedPattern>
+            </relocation>
+            <relocation>
+              <pattern>com.google.protobuf</pattern>
+              <shadedPattern>${spark.shade.packageName}.spark_core.protobuf</shadedPattern>
+              <includes>
+                <include>com.google.protobuf.**</include>
+              </includes>
+            </relocation>
+          </relocations>
+        </configuration>
       </plugin>
     </plugins>
   </build>
@@ -640,13 +719,67 @@
       </build>
     </profile>
     <profile>
-      <id>scala-2.13</id>
-      <dependencies>
-        <dependency>
-          <groupId>org.scala-lang.modules</groupId>
-          <artifactId>scala-parallel-collections_${scala.binary.version}</artifactId>
-        </dependency>
-      </dependencies>
+      <id>default-protoc</id>
+      <activation>
+        <property>
+          <name>!skipDefaultProtoc</name>
+        </property>
+      </activation>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>com.github.os72</groupId>
+            <artifactId>protoc-jar-maven-plugin</artifactId>
+            <version>${protoc-jar-maven-plugin.version}</version>
+            <executions>
+              <execution>
+                <phase>generate-sources</phase>
+                <goals>
+                  <goal>run</goal>
+                </goals>
+                <configuration>
+                  <protocArtifact>com.google.protobuf:protoc:${protobuf.version}</protocArtifact>
+                  <protocVersion>${protobuf.version}</protocVersion>
+                  <inputDirectories>
+                    <include>src/main/protobuf</include>
+                  </inputDirectories>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <profile>
+      <id>user-defined-protoc</id>
+      <properties>
+        <spark.protoc.executable.path>${env.SPARK_PROTOC_EXEC_PATH}</spark.protoc.executable.path>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>com.github.os72</groupId>
+            <artifactId>protoc-jar-maven-plugin</artifactId>
+            <version>${protoc-jar-maven-plugin.version}</version>
+            <executions>
+              <execution>
+                <phase>generate-sources</phase>
+                <goals>
+                  <goal>run</goal>
+                </goals>
+                <configuration>
+                  <protocArtifact>com.google.protobuf:protoc:${protobuf.version}</protocArtifact>
+                  <protocVersion>${protobuf.version}</protocVersion>
+                  <protocCommand>${spark.protoc.executable.path}</protocCommand>
+                  <inputDirectories>
+                    <include>src/main/protobuf</include>
+                  </inputDirectories>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
     </profile>
   </profiles>
 

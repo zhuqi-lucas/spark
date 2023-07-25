@@ -623,13 +623,7 @@ private[hive] trait HiveInspectors {
         case x: BinaryObjectInspector if x.preferWritable() =>
           data: Any => {
             if (data != null) {
-              // BytesWritable.copyBytes() only available since Hadoop2
-              // In order to keep backward-compatible, we have to copy the
-              // bytes with old apis
-              val bw = x.getPrimitiveWritableObject(data)
-              val result = new Array[Byte](bw.getLength())
-              System.arraycopy(bw.getBytes(), 0, result, 0, bw.getLength())
-              result
+              x.getPrimitiveWritableObject(data).copyBytes()
             } else {
               null
             }
@@ -806,8 +800,7 @@ private[hive] trait HiveInspectors {
   def wrap(
       row: Seq[Any],
       wrappers: Array[(Any) => Any],
-      cache: Array[AnyRef],
-      dataTypes: Array[DataType]): Array[AnyRef] = {
+      cache: Array[AnyRef]): Array[AnyRef] = {
     var i = 0
     val length = wrappers.length
     while (i < length) {
@@ -922,7 +915,8 @@ private[hive] trait HiveInspectors {
     case Literal(_, dt: UserDefinedType[_]) =>
       toInspector(dt.sqlType)
     // We will enumerate all of the possible constant expressions, throw exception if we missed
-    case Literal(_, dt) => sys.error(s"Hive doesn't support the constant type [$dt].")
+    case Literal(_, dt) =>
+      throw new IllegalStateException(s"Hive doesn't support the constant type [$dt].")
     // ideally, we don't test the foldable here(but in optimizer), however, some of the
     // Hive UDF / UDAF requires its argument to be constant objectinspector, we do it eagerly.
     case _ if expr.foldable => toInspector(Literal.create(expr.eval(), expr.dataType))
@@ -935,7 +929,7 @@ private[hive] trait HiveInspectors {
       StructType(s.getAllStructFieldRefs.asScala.map(f =>
         types.StructField(
           f.getFieldName, inspectorToDataType(f.getFieldObjectInspector), nullable = true)
-      ).toSeq)
+      ).toArray)
     case l: ListObjectInspector => ArrayType(inspectorToDataType(l.getListElementObjectInspector))
     case m: MapObjectInspector =>
       MapType(

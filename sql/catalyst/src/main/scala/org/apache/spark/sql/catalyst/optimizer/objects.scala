@@ -25,6 +25,7 @@ import org.apache.spark.sql.catalyst.expressions.objects._
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules._
 import org.apache.spark.sql.catalyst.trees.TreePattern._
+import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.types.{ArrayType, DataType, MapType, StructType, UserDefinedType}
 
 /*
@@ -165,7 +166,8 @@ object ObjectSerializerPruning extends Rule[LogicalPlan] {
    * Note: we should do `transformUp` explicitly to change data types.
    */
   private def alignNullTypeInIf(expr: Expression) = expr.transformUp {
-    case i @ If(IsNullCondition(), Literal(null, dt), ser) if !dt.sameType(ser.dataType) =>
+    case i @ If(IsNullCondition(), Literal(null, dt), ser)
+      if !DataTypeUtils.sameType(dt, ser.dataType) =>
       i.copy(trueValue = Literal(null, ser.dataType))
   }
 
@@ -186,7 +188,7 @@ object ObjectSerializerPruning extends Rule[LogicalPlan] {
       serializer: NamedExpression,
       prunedDataType: DataType): NamedExpression = {
     val prunedStructTypes = collectStructType(prunedDataType, ArrayBuffer.empty[StructType])
-      .toIterator
+      .iterator
 
     def transformer: PartialFunction[Expression, Expression] = {
       case m: ExternalMapToCatalyst =>
@@ -204,7 +206,7 @@ object ObjectSerializerPruning extends Rule[LogicalPlan] {
     val transformedSerializer = serializer.transformDown(transformer)
     val prunedSerializer = alignNullTypeInIf(transformedSerializer).asInstanceOf[NamedExpression]
 
-    if (prunedSerializer.dataType.sameType(prunedDataType)) {
+    if (DataTypeUtils.sameType(prunedSerializer.dataType, prunedDataType)) {
       prunedSerializer
     } else {
       serializer
@@ -222,14 +224,14 @@ object ObjectSerializerPruning extends Rule[LogicalPlan] {
 
       if (conf.serializerNestedSchemaPruningEnabled && rootFields.nonEmpty) {
         // Prunes nested fields in serializers.
-        val prunedSchema = SchemaPruning.pruneDataSchema(
-          StructType.fromAttributes(prunedSerializer.map(_.toAttribute)), rootFields)
+        val prunedSchema = SchemaPruning.pruneSchema(
+          DataTypeUtils.fromAttributes(prunedSerializer.map(_.toAttribute)), rootFields)
         val nestedPrunedSerializer = prunedSerializer.zipWithIndex.map { case (serializer, idx) =>
           pruneSerializer(serializer, prunedSchema(idx).dataType)
         }
 
         // Builds new projection.
-        val projectionOverSchema = ProjectionOverSchema(prunedSchema)
+        val projectionOverSchema = ProjectionOverSchema(prunedSchema, AttributeSet(s.output))
         val newProjects = p.projectList.map(_.transformDown {
           case projectionOverSchema(expr) => expr
         }).map { case expr: NamedExpression => expr }

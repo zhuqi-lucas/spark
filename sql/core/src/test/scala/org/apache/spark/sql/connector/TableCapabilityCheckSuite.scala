@@ -17,15 +17,12 @@
 
 package org.apache.spark.sql.connector
 
-import java.util
-
-import scala.collection.JavaConverters._
-
 import org.apache.spark.sql.{AnalysisException, DataFrame, SQLContext}
 import org.apache.spark.sql.catalyst.analysis.{AnalysisTest, NamedRelation}
 import org.apache.spark.sql.catalyst.expressions.{AttributeReference, EqualTo, Literal}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.streaming.StreamingRelationV2
+import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
 import org.apache.spark.sql.connector.catalog.{Table, TableCapability}
 import org.apache.spark.sql.connector.catalog.TableCapability._
 import org.apache.spark.sql.execution.datasources.DataSource
@@ -45,7 +42,7 @@ class TableCapabilityCheckSuite extends AnalysisTest with SharedSparkSession {
       "fake",
       table,
       CaseInsensitiveStringMap.empty(),
-      TableCapabilityCheckSuite.schema.toAttributes,
+      toAttributes(TableCapabilityCheckSuite.schema),
       None,
       None,
       v1Relation)
@@ -211,13 +208,17 @@ private object TableCapabilityCheckSuite {
 
 private case object TestRelation extends LeafNode with NamedRelation {
   override def name: String = "source_relation"
-  override def output: Seq[AttributeReference] = TableCapabilityCheckSuite.schema.toAttributes
+  override def output: Seq[AttributeReference] = toAttributes(TableCapabilityCheckSuite.schema)
 }
 
 private case class CapabilityTable(_capabilities: TableCapability*) extends Table {
   override def name(): String = "capability_test_table"
   override def schema(): StructType = TableCapabilityCheckSuite.schema
-  override def capabilities(): util.Set[TableCapability] = _capabilities.toSet.asJava
+  override def capabilities(): java.util.Set[TableCapability] = {
+    val set = java.util.EnumSet.noneOf(classOf[TableCapability])
+    _capabilities.foreach(set.add)
+    set
+  }
 }
 
 private class TestStreamSourceProvider extends StreamSourceProvider {

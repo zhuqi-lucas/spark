@@ -26,7 +26,9 @@ import org.apache.spark.sql.connector.read.streaming
 import org.apache.spark.sql.connector.read.streaming.{ReadLimit, SupportsAdmissionControl}
 import org.apache.spark.sql.execution.streaming.{LongOffset, MemoryStream, Offset, SerializedOffset, Source, StreamingExecutionRelation}
 import org.apache.spark.sql.types.{LongType, StructType}
+import org.apache.spark.tags.SlowSQLTest
 
+@SlowSQLTest
 class TriggerAvailableNowSuite extends FileStreamSourceTest {
 
   import testImplicits._
@@ -128,7 +130,7 @@ class TriggerAvailableNowSuite extends FileStreamSourceTest {
           .option("maxFilesPerTrigger", 1)
           .text(src.getCanonicalPath)
 
-        val df2 = testSource.toDF
+        val df2 = testSource.toDF.selectExpr("cast(value as string)")
 
         def startQuery(): StreamingQuery = {
           df1.union(df2).writeStream

@@ -8,9 +8,9 @@ license: |
   The ASF licenses this file to You under the Apache License, Version 2.0
   (the "License"); you may not use this file except in compliance with
   the License.  You may obtain a copy of the License at
- 
+
      http://www.apache.org/licenses/LICENSE-2.0
- 
+
   Unless required by applicable law or agreed to in writing, software
   distributed under the License is distributed on an "AS IS" BASIS,
   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -53,8 +53,8 @@ You should see the new node listed there, along with its number of CPUs and memo
 
 Finally, the following configuration options can be passed to the master and worker:
 
-<table class="table">
-  <tr><th style="width:21%">Argument</th><th>Meaning</th></tr>
+<table class="table table-striped">
+  <thead><tr><th style="width:21%">Argument</th><th>Meaning</th></tr></thead>
   <tr>
     <td><code>-h HOST</code>, <code>--host HOST</code></td>
     <td>Hostname to listen on</td>
@@ -114,8 +114,8 @@ Note that these scripts must be executed on the machine you want to run the Spar
 
 You can optionally configure the cluster further by setting environment variables in `conf/spark-env.sh`. Create this file by starting with the `conf/spark-env.sh.template`, and _copy it to all your worker machines_ for the settings to take effect. The following settings are available:
 
-<table class="table">
-  <tr><th style="width:21%">Environment Variable</th><th>Meaning</th></tr>
+<table class="table table-striped">
+  <thead><tr><th style="width:21%">Environment Variable</th><th>Meaning</th></tr></thead>
   <tr>
     <td><code>SPARK_MASTER_HOST</code></td>
     <td>Bind the master to a specific hostname or IP address, for example a public one.</td>
@@ -186,8 +186,8 @@ You can optionally configure the cluster further by setting environment variable
 
 SPARK_MASTER_OPTS supports the following system properties:
 
-<table class="table">
-<tr><th>Property Name</th><th>Default</th><th>Meaning</th><th>Since Version</th></tr>
+<table class="table table-striped">
+<thead><tr><th>Property Name</th><th>Default</th><th>Meaning</th><th>Since Version</th></tr></thead>
 <tr>
   <td><code>spark.deploy.retainedApplications</code></td>
   <td>200</td>
@@ -285,8 +285,8 @@ SPARK_MASTER_OPTS supports the following system properties:
 
 SPARK_WORKER_OPTS supports the following system properties:
 
-<table class="table">
-<tr><th>Property Name</th><th>Default</th><th>Meaning</th><th>Since Version</th></tr>
+<table class="table table-striped">
+<thead><tr><th>Property Name</th><th>Default</th><th>Meaning</th><th>Since Version</th></tr></thead>
 <tr>
   <td><code>spark.worker.cleanup.enabled</code></td>
   <td>false</td>
@@ -327,6 +327,16 @@ SPARK_WORKER_OPTS supports the following system properties:
     eventually gets cleaned up.  This config may be removed in the future.
   </td>
   <td>3.0.0</td>
+</tr>
+<tr>
+  <td><code>spark.shuffle.service.db.backend</code></td>
+  <td>LEVELDB</td>
+  <td>
+    When <code>spark.shuffle.service.db.enabled</code> is true, user can use this to specify the kind of disk-based
+    store used in shuffle service state store. This supports `LEVELDB` and `ROCKSDB` now and `LEVELDB` as default value.
+    The original data store in `LevelDB/RocksDB` will not be automatically convert to another kind of storage now.
+  </td>
+  <td>3.4.0</td>
 </tr>
 <tr>
   <td><code>spark.storage.cleanupFilesAfterExecutorExit</code></td>
@@ -378,10 +388,10 @@ You can also pass an option `--total-executor-cores <numCores>` to control the n
 
 # Client Properties
 
-Spark applications supports the following configuration properties specific to standalone mode: 
+Spark applications supports the following configuration properties specific to standalone mode:
 
-<table class="table">
-  <tr><th style="width:21%">Property Name</th><th>Default Value</th><th>Meaning</th><th>Since Version</th></tr>
+<table class="table table-striped">
+  <thead><tr><th style="width:21%">Property Name</th><th>Default Value</th><th>Meaning</th><th>Since Version</th></tr></thead>
   <tr>
   <td><code>spark.standalone.submit.waitAppCompletion</code></td>
   <td><code>false</code></td>
@@ -455,6 +465,16 @@ if the worker has enough cores and memory. Otherwise, each executor grabs all th
 on the worker by default, in which case only one executor per application may be launched on each
 worker during one single schedule iteration.
 
+# Stage Level Scheduling Overview
+
+Stage level scheduling is supported on Standalone:
+- When dynamic allocation is disabled: It allows users to specify different task resource requirements at the stage level and will use the same executors requested at startup.
+- When dynamic allocation is enabled: Currently, when the Master allocates executors for one application, it will schedule based on the order of the ResourceProfile ids for multiple ResourceProfiles. The ResourceProfile with smaller id will be scheduled firstly. Normally this won’t matter as Spark finishes one stage before starting another one, the only case this might have an affect is in a job server type scenario, so its something to keep in mind. For scheduling, we will only take executor memory and executor cores from built-in executor resources and all other custom resources from a ResourceProfile, other built-in executor resources such as offHeap and memoryOverhead won't take any effect. The base default profile will be created based on the spark configs when you submit an application. Executor memory and executor cores from the base default profile can be propagated to custom ResourceProfiles, but all other custom resources can not be propagated.
+
+## Caveats
+
+As mentioned in [Dynamic Resource Allocation](job-scheduling.html#dynamic-resource-allocation), if cores for each executor is not explicitly specified with dynamic allocation enabled, spark will possibly acquire much more executors than expected. So you are recommended to explicitly set executor cores for each resource profile when using stage level scheduling.
+
 # Monitoring and Logging
 
 Spark's standalone mode offers a web-based user interface to monitor the cluster. The master and each worker has its own web UI that shows cluster and job statistics. By default, you can access the web UI for the master at port 8080. The port can be changed either in the configuration file or via command-line options.
@@ -519,8 +539,8 @@ ZooKeeper is the best way to go for production-level high availability, but if y
 
 In order to enable this recovery mode, you can set SPARK_DAEMON_JAVA_OPTS in spark-env using this configuration:
 
-<table class="table">
-  <tr><th style="width:21%">System property</th><th>Meaning</th><th>Since Version</th></tr>
+<table class="table table-striped">
+  <thead><tr><th style="width:21%">System property</th><th>Meaning</th><th>Since Version</th></tr></thead>
   <tr>
     <td><code>spark.deploy.recoveryMode</code></td>
     <td>Set to FILESYSTEM to enable single-node recovery mode (default: NONE).</td>

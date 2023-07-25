@@ -44,9 +44,9 @@ class TimestampFormatterSuite extends DatetimeFormatterSuite {
       CET.getId -> 1543741872001234L,
       "Africa/Dakar" -> 1543745472001234L,
       "America/Los_Angeles" -> 1543774272001234L,
-      "Antarctica/Vostok" -> 1543723872001234L,
+      "Asia/Urumqi" -> 1543723872001234L,
       "Asia/Hong_Kong" -> 1543716672001234L,
-      "Europe/Amsterdam" -> 1543741872001234L)
+      "Europe/Brussels" -> 1543741872001234L)
     outstandingTimezonesIds.foreach { zoneId =>
       val formatter = TimestampFormatter(
         "yyyy-MM-dd'T'HH:mm:ss.SSSSSS",
@@ -65,9 +65,9 @@ class TimestampFormatterSuite extends DatetimeFormatterSuite {
       CET.getId -> "2018-12-02 11:11:12.001234",
       "Africa/Dakar" -> "2018-12-02 10:11:12.001234",
       "America/Los_Angeles" -> "2018-12-02 02:11:12.001234",
-      "Antarctica/Vostok" -> "2018-12-02 16:11:12.001234",
+      "Asia/Urumqi" -> "2018-12-02 16:11:12.001234",
       "Asia/Hong_Kong" -> "2018-12-02 18:11:12.001234",
-      "Europe/Amsterdam" -> "2018-12-02 11:11:12.001234")
+      "Europe/Brussels" -> "2018-12-02 11:11:12.001234")
     outstandingTimezonesIds.foreach { zoneId =>
       Seq(
         TimestampFormatter(
@@ -412,7 +412,7 @@ class TimestampFormatterSuite extends DatetimeFormatterSuite {
     assert(formatter.format(date(1970, 1, 3)) == "03")
     assert(formatter.format(date(1970, 4, 9)) == "99")
 
-    if (System.getProperty("java.version").split("\\D+")(0).toInt < 9) {
+    if (SystemUtils.isJavaVersionAtMost(JavaVersion.JAVA_1_8)) {
       // https://bugs.openjdk.java.net/browse/JDK-8079628
       intercept[SparkUpgradeException] {
         formatter.format(date(1970, 4, 10))
@@ -453,7 +453,59 @@ class TimestampFormatterSuite extends DatetimeFormatterSuite {
       val errMsg = intercept[DateTimeException] {
         formatter.parse("x123")
       }.getMessage
-      assert(errMsg.contains("Cannot cast x123 to TimestampType"))
+      assert(errMsg.contains(
+        """The value 'x123' of the type "STRING" cannot be cast to "TIMESTAMP""""))
     }
+  }
+
+  test("SPARK-39193: support returning optional parse results in the default formatter") {
+    val formatter = new DefaultTimestampFormatter(
+      DateTimeTestUtils.LA,
+      locale = DateFormatter.defaultLocale,
+      legacyFormat = LegacyDateFormats.SIMPLE_DATE_FORMAT,
+      isParsing = true)
+    assert(formatter.parseOptional("2021-01-01T00:00:00").contains(1609488000000000L))
+    assert(
+      formatter.parseWithoutTimeZoneOptional("2021-01-01T00:00:00", false)
+        .contains(1609459200000000L))
+    assert(formatter.parseOptional("abc").isEmpty)
+    assert(
+      formatter.parseWithoutTimeZoneOptional("abc", false).isEmpty)
+  }
+
+  test("SPARK-39280: support returning optional parse results in the iso8601 formatter") {
+    val formatter = new Iso8601TimestampFormatter(
+      "yyyy-MM-dd HH:mm:ss.SSSS",
+      locale = DateFormatter.defaultLocale,
+      legacyFormat = LegacyDateFormats.SIMPLE_DATE_FORMAT,
+      isParsing = true, zoneId = DateTimeTestUtils.LA)
+    assert(formatter.parseOptional("9999-12-31 23:59:59.9990").contains(253402329599999000L))
+    assert(formatter.parseWithoutTimeZoneOptional("9999-12-31 23:59:59.9990", false)
+      .contains(253402300799999000L))
+    assert(formatter.parseOptional("abc").isEmpty)
+    assert(formatter.parseWithoutTimeZoneOptional("abc", false).isEmpty)
+
+    assert(formatter.parseOptional("2012-00-65 23:59:59.9990").isEmpty)
+    assert(formatter.parseWithoutTimeZoneOptional("2012-00-65 23:59:59.9990", false)
+      .isEmpty)
+  }
+
+  test("SPARK-39281: support returning optional parse results in the legacy formatter") {
+    val fastFormatter = new LegacyFastTimestampFormatter(
+      "yyyy-MM-dd HH:mm:ss.SSSS",
+      locale = DateFormatter.defaultLocale,
+      zoneId = DateTimeTestUtils.UTC)
+
+    val simpleFormatter = new LegacySimpleTimestampFormatter(
+      "yyyy-MM-dd HH:mm:ss.SSSS",
+      locale = DateFormatter.defaultLocale,
+      zoneId = DateTimeTestUtils.UTC)
+
+    assert(fastFormatter.parseOptional("2023-12-31 23:59:59.9990").contains(1704067199999000L))
+    assert(fastFormatter.parseOptional("abc").isEmpty)
+
+    assert(simpleFormatter.parseOptional("2023-12-31 23:59:59.9990").contains(1704067208990000L))
+    assert(simpleFormatter.parseOptional("abc").isEmpty)
+
   }
 }

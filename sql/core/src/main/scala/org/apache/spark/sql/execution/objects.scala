@@ -32,8 +32,10 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.expressions.objects.Invoke
+import org.apache.spark.sql.catalyst.plans.ReferenceAllColumns
 import org.apache.spark.sql.catalyst.plans.logical.{EventTimeWatermark, FunctionUtils, LogicalGroupState}
 import org.apache.spark.sql.catalyst.plans.physical._
+import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.execution.python.BatchIterator
 import org.apache.spark.sql.execution.r.ArrowRRunner
 import org.apache.spark.sql.execution.streaming.GroupStateImpl
@@ -58,13 +60,8 @@ trait ObjectProducerExec extends SparkPlan {
 /**
  * Physical version of `ObjectConsumer`.
  */
-trait ObjectConsumerExec extends UnaryExecNode {
+trait ObjectConsumerExec extends UnaryExecNode with ReferenceAllColumns[SparkPlan] {
   assert(child.output.length == 1)
-
-  // This operator always need all columns of its child, even it doesn't reference to.
-  @transient
-  override lazy val references: AttributeSet = child.outputSet
-
   def inputObjectType: DataType = child.output.head.dataType
 }
 
@@ -391,7 +388,8 @@ case class AppendColumnsWithObjectExec(
 
 /**
  * Groups the input rows together and calls the function with each group and an iterator containing
- * all elements in the group.  The result of this function is flattened before being output.
+ * all elements in the group. The iterator is sorted according to `dataOrder` if given.
+ * The result of this function is flattened before being output.
  */
 case class MapGroupsExec(
     func: (Any, Iterator[Any]) => TraversableOnce[Any],
@@ -399,6 +397,7 @@ case class MapGroupsExec(
     valueDeserializer: Expression,
     groupingAttributes: Seq[Attribute],
     dataAttributes: Seq[Attribute],
+    dataOrder: Seq[SortOrder],
     outputObjAttr: Attribute,
     child: SparkPlan) extends UnaryExecNode with ObjectProducerExec {
 
@@ -408,7 +407,7 @@ case class MapGroupsExec(
     ClusteredDistribution(groupingAttributes) :: Nil
 
   override def requiredChildOrdering: Seq[Seq[SortOrder]] =
-    Seq(groupingAttributes.map(SortOrder(_, Ascending)))
+    Seq(groupingAttributes.map(SortOrder(_, Ascending)) ++ dataOrder)
 
   override protected def doExecute(): RDD[InternalRow] = {
     child.execute().mapPartitionsInternal { iter =>
@@ -438,6 +437,7 @@ object MapGroupsExec {
       valueDeserializer: Expression,
       groupingAttributes: Seq[Attribute],
       dataAttributes: Seq[Attribute],
+      dataOrder: Seq[SortOrder],
       outputObjAttr: Attribute,
       timeoutConf: GroupStateTimeout,
       child: SparkPlan): MapGroupsExec = {
@@ -449,7 +449,7 @@ object MapGroupsExec {
       func(key, values, GroupStateImpl.createForBatch(timeoutConf, watermarkPresent))
     }
     new MapGroupsExec(f, keyDeserializer, valueDeserializer,
-      groupingAttributes, dataAttributes, outputObjAttr, child)
+      groupingAttributes, dataAttributes, dataOrder, outputObjAttr, child)
   }
 }
 
@@ -594,7 +594,7 @@ case class FlatMapGroupsInRWithArrowExec(
       // binary in a batch due to the limitation of R API. See also ARROW-4512.
       val columnarBatchIter = runner.compute(groupedByRKey, -1)
       val outputProject = UnsafeProjection.create(output, output)
-      val outputTypes = StructType.fromAttributes(output).map(_.dataType)
+      val outputTypes = DataTypeUtils.fromAttributes(output).map(_.dataType)
 
       columnarBatchIter.flatMap { batch =>
         val actualDataTypes = (0 until batch.numCols()).map(i => batch.column(i).dataType())
@@ -623,15 +623,19 @@ case class CoGroupExec(
     rightGroup: Seq[Attribute],
     leftAttr: Seq[Attribute],
     rightAttr: Seq[Attribute],
+    leftOrder: Seq[SortOrder],
+    rightOrder: Seq[SortOrder],
     outputObjAttr: Attribute,
     left: SparkPlan,
     right: SparkPlan) extends BinaryExecNode with ObjectProducerExec {
 
   override def requiredChildDistribution: Seq[Distribution] =
-    HashClusteredDistribution(leftGroup) :: HashClusteredDistribution(rightGroup) :: Nil
+    ClusteredDistribution(leftGroup) :: ClusteredDistribution(rightGroup) :: Nil
 
   override def requiredChildOrdering: Seq[Seq[SortOrder]] =
-    leftGroup.map(SortOrder(_, Ascending)) :: rightGroup.map(SortOrder(_, Ascending)) :: Nil
+    (leftGroup.map(SortOrder(_, Ascending)) ++ leftOrder) ::
+      (rightGroup.map(SortOrder(_, Ascending)) ++ rightOrder) ::
+      Nil
 
   override protected def doExecute(): RDD[InternalRow] = {
     left.execute().zipPartitions(right.execute()) { (leftData, rightData) =>

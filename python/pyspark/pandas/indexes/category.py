@@ -14,10 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import warnings
 from typing import Any, Callable, List, Optional, Union, cast, no_type_check
 
 import pandas as pd
-from pandas.api.types import is_hashable, CategoricalDtype
+from pandas.api.types import is_hashable, CategoricalDtype  # type: ignore[attr-defined]
 
 from pyspark import pandas as ps
 from pyspark.pandas.indexes.base import Index
@@ -140,7 +141,7 @@ class CategoricalIndex(Index):
         CategoricalIndex(['a', 'b', 'b', 'c', 'c', 'c'],
                          categories=['a', 'b', 'c'], ordered=False, dtype='category')
 
-        >>> idx.codes
+        >>> idx.codes  # doctest: +SKIP
         Int64Index([0, 1, 1, 2, 2, 2], dtype='int64')
         """
         return self._with_new_scol(
@@ -252,6 +253,10 @@ class CategoricalIndex(Index):
                          categories=['a', 'b', 'c', 'x'], ordered=False, dtype='category')
         """
         if inplace:
+            warnings.warn(
+                "Argument `inplace` will be removed in 4.0.0.",
+                FutureWarning,
+            )
             raise ValueError("cannot use inplace with CategoricalIndex")
 
         return CategoricalIndex(
@@ -285,6 +290,10 @@ class CategoricalIndex(Index):
                          categories=['a', 'b', 'c'], ordered=True, dtype='category')
         """
         if inplace:
+            warnings.warn(
+                "Argument `inplace` will be removed in 4.0.0.",
+                FutureWarning,
+            )
             raise ValueError("cannot use inplace with CategoricalIndex")
 
         return CategoricalIndex(self.to_series().cat.as_ordered()).rename(self.name)
@@ -316,6 +325,10 @@ class CategoricalIndex(Index):
                          categories=['a', 'b', 'c'], ordered=False, dtype='category')
         """
         if inplace:
+            warnings.warn(
+                "Argument `inplace` will be removed in 4.0.0.",
+                FutureWarning,
+            )
             raise ValueError("cannot use inplace with CategoricalIndex")
 
         return CategoricalIndex(self.to_series().cat.as_unordered()).rename(self.name)
@@ -369,6 +382,10 @@ class CategoricalIndex(Index):
                          categories=['a', 'c'], ordered=False, dtype='category')
         """
         if inplace:
+            warnings.warn(
+                "Argument `inplace` will be removed in 4.0.0.",
+                FutureWarning,
+            )
             raise ValueError("cannot use inplace with CategoricalIndex")
 
         return CategoricalIndex(self.to_series().cat.remove_categories(removals)).rename(self.name)
@@ -410,6 +427,10 @@ class CategoricalIndex(Index):
                          categories=['a', 'b', 'c'], ordered=False, dtype='category')
         """
         if inplace:
+            warnings.warn(
+                "Argument `inplace` will be removed in 4.0.0.",
+                FutureWarning,
+            )
             raise ValueError("cannot use inplace with CategoricalIndex")
 
         return CategoricalIndex(self.to_series().cat.remove_unused_categories()).rename(self.name)
@@ -480,6 +501,10 @@ class CategoricalIndex(Index):
         CategoricalIndex(['A', 'A', 'B'], categories=['A', 'B'], ordered=False, dtype='category')
         """
         if inplace:
+            warnings.warn(
+                "Argument `inplace` will be removed in 4.0.0.",
+                FutureWarning,
+            )
             raise ValueError("cannot use inplace with CategoricalIndex")
 
         return CategoricalIndex(self.to_series().cat.rename_categories(new_categories)).rename(
@@ -495,7 +520,7 @@ class CategoricalIndex(Index):
         """
         Reorder categories as specified in new_categories.
 
-        `new_categories` need to include all old categories and no new category
+        `new_categories` needs to include all old categories and no new category
         items.
 
         Parameters
@@ -503,7 +528,7 @@ class CategoricalIndex(Index):
         new_categories : Index-like
            The categories in new order.
         ordered : bool, optional
-           Whether or not the categorical is treated as a ordered categorical.
+           Whether or not the categorical is treated as an ordered categorical.
            If not given, do not change the ordered information.
         inplace : bool, default False
            Whether or not to reorder the categories inplace or return a copy of
@@ -542,6 +567,10 @@ class CategoricalIndex(Index):
                          categories=['c', 'b', 'a'], ordered=False, dtype='category')
         """
         if inplace:
+            warnings.warn(
+                "Argument `inplace` will be removed in 4.0.0.",
+                FutureWarning,
+            )
             raise ValueError("cannot use inplace with CategoricalIndex")
 
         return CategoricalIndex(
@@ -560,7 +589,7 @@ class CategoricalIndex(Index):
 
         `new_categories` can include new categories (which will result in
         unused categories) or remove old categories (which results in values
-        set to NaN). If `rename==True`, the categories will simple be renamed
+        set to NaN). If `rename==True`, the categories will simply be renamed
         (less or more items than in old categories will result in values set to
         NaN or in unused categories respectively).
 
@@ -571,7 +600,7 @@ class CategoricalIndex(Index):
         On the other hand this methods does not do checks (e.g., whether the
         old categories are included in the new categories on a reorder), which
         can result in surprising changes, for example when using special string
-        dtypes, which does not considers a S1 string equal to a single char
+        dtypes, which does not consider a S1 string equal to a single char
         python string.
 
         Parameters
@@ -579,7 +608,7 @@ class CategoricalIndex(Index):
         new_categories : Index-like
            The categories in new order.
         ordered : bool, default False
-           Whether or not the categorical is treated as a ordered categorical.
+           Whether or not the categorical is treated as an ordered categorical.
            If not given, do not change the ordered information.
         rename : bool, default False
            Whether or not the new_categories should be considered as a rename
@@ -625,6 +654,10 @@ class CategoricalIndex(Index):
         CategoricalIndex([1, 2, 2, 3, 3, 3], categories=[1, 2, 3], ordered=True, dtype='category')
         """
         if inplace:
+            warnings.warn(
+                "Argument `inplace` will be removed in 4.0.0.",
+                FutureWarning,
+            )
             raise ValueError("cannot use inplace with CategoricalIndex")
 
         return CategoricalIndex(
@@ -704,6 +737,10 @@ class CategoricalIndex(Index):
         Index(['first', 'second', None], dtype='object')
         """
         return super().map(mapper)
+
+    @no_type_check
+    def all(self, *args, **kwargs) -> None:
+        raise TypeError("Cannot perform 'all' with this index type: %s" % type(self).__name__)
 
 
 def _test() -> None:

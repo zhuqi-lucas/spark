@@ -19,6 +19,7 @@ package org.apache.spark.rdd
 
 import java.io.{File, IOException, ObjectInputStream, ObjectOutputStream}
 import java.lang.management.ManagementFactory
+import java.util.concurrent.atomic.AtomicInteger
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.{ArrayBuffer, HashMap}
@@ -32,8 +33,9 @@ import org.scalatest.concurrent.Eventually
 
 import org.apache.spark._
 import org.apache.spark.api.java.{JavaRDD, JavaSparkContext}
-import org.apache.spark.internal.config.RDD_PARALLEL_LISTING_THRESHOLD
+import org.apache.spark.internal.config.{RDD_LIMIT_INITIAL_NUM_PARTITIONS, RDD_PARALLEL_LISTING_THRESHOLD}
 import org.apache.spark.rdd.RDDSuiteUtils._
+import org.apache.spark.scheduler.{SparkListener, SparkListenerJobStart}
 import org.apache.spark.util.{ThreadUtils, Utils}
 
 class RDDSuite extends SparkFunSuite with SharedSparkContext with Eventually {
@@ -238,7 +240,7 @@ class RDDSuite extends SparkFunSuite with SharedSparkContext with Eventually {
   test("aggregate") {
     val pairs = sc.makeRDD(Seq(("a", 1), ("b", 2), ("a", 2), ("c", 5), ("a", 3)))
     type StringMap = scala.collection.mutable.Map[String, Int]
-    val emptyMap = HashMap[String, Int]().withDefaultValue(0).asInstanceOf[StringMap]
+    val emptyMap = HashMap[String, Int]().withDefaultValue(0)
     val mergeElement: (StringMap, (String, Int)) => StringMap = (map, pair) => {
       map(pair._1) += pair._2
       map
@@ -496,7 +498,7 @@ class RDDSuite extends SparkFunSuite with SharedSparkContext with Eventually {
 
   test("coalesced RDDs with locality, large scale (10K partitions)") {
     // large scale experiment
-    import collection.mutable
+    import scala.collection.mutable
     val partitions = 10000
     val numMachines = 50
     val machines = mutable.ListBuffer[String]()
@@ -537,7 +539,7 @@ class RDDSuite extends SparkFunSuite with SharedSparkContext with Eventually {
 
   test("coalesced RDDs with partial locality, large scale (10K partitions)") {
     // large scale experiment
-    import collection.mutable
+    import scala.collection.mutable
     val halfpartitions = 5000
     val partitions = 10000
     val numMachines = 50
@@ -693,6 +695,11 @@ class RDDSuite extends SparkFunSuite with SharedSparkContext with Eventually {
     val rdd = sc.makeRDD(nums, 2)
     val sortedLowerK = rdd.takeOrdered(0)
     assert(sortedLowerK.size === 0)
+  }
+
+  test("SPARK-40276: takeOrdered with empty RDDs") {
+    assert(sc.emptyRDD[Int].takeOrdered(5) === Array.emptyIntArray)
+    assert(sc.range(0, 10, 1, 3).filter(_ < 0).takeOrdered(5) === Array.emptyLongArray)
   }
 
   test("takeOrdered with custom ordering") {
@@ -1253,6 +1260,41 @@ class RDDSuite extends SparkFunSuite with SharedSparkContext with Eventually {
     // This should not become flaky since the DefaultPartitionsCoalescer uses a fixed seed.
     assert(numPartsPerLocation(locations(0)) > 0.4 * numCoalescedPartitions)
     assert(numPartsPerLocation(locations(1)) > 0.4 * numCoalescedPartitions)
+  }
+
+  test("SPARK-40211: customize initialNumPartitions for take") {
+    val totalElements = 100
+    val numToTake = 50
+    val rdd = sc.parallelize(0 to totalElements, totalElements)
+    import scala.language.reflectiveCalls
+    val jobCountListener = new SparkListener {
+      private var count: AtomicInteger = new AtomicInteger(0)
+      def getCount: Int = count.get
+      def reset(): Unit = count.set(0)
+      override def onJobStart(jobStart: SparkListenerJobStart): Unit = {
+        count.incrementAndGet()
+      }
+    }
+    sc.addSparkListener(jobCountListener)
+    // with default RDD_LIMIT_INITIAL_NUM_PARTITIONS = 1, expecting multiple jobs
+    rdd.take(numToTake)
+    sc.listenerBus.waitUntilEmpty()
+    assert(jobCountListener.getCount > 1)
+    jobCountListener.reset()
+    rdd.takeAsync(numToTake).get()
+    sc.listenerBus.waitUntilEmpty()
+    assert(jobCountListener.getCount > 1)
+
+    // setting RDD_LIMIT_INITIAL_NUM_PARTITIONS to large number(1000), expecting only 1 job
+    sc.conf.set(RDD_LIMIT_INITIAL_NUM_PARTITIONS, 1000)
+    jobCountListener.reset()
+    rdd.take(numToTake)
+    sc.listenerBus.waitUntilEmpty()
+    assert(jobCountListener.getCount == 1)
+    jobCountListener.reset()
+    rdd.takeAsync(numToTake).get()
+    sc.listenerBus.waitUntilEmpty()
+    assert(jobCountListener.getCount == 1)
   }
 
   // NOTE

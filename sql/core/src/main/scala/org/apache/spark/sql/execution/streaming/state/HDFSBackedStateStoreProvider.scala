@@ -27,13 +27,13 @@ import scala.collection.mutable
 import scala.util.control.NonFatal
 
 import com.google.common.io.ByteStreams
+import org.apache.commons.io.IOUtils
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs._
 
 import org.apache.spark.{SparkConf, SparkEnv}
 import org.apache.spark.internal.Logging
 import org.apache.spark.io.CompressionCodec
-import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow
 import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.execution.streaming.CheckpointFileManager
@@ -218,12 +218,19 @@ private[sql] class HDFSBackedStateStoreProvider extends StateStoreProvider with 
   }
 
   private def getLoadedMapForStore(version: Long): HDFSBackedStateStoreMap = synchronized {
-    require(version >= 0, "Version cannot be less than 0")
-    val newMap = HDFSBackedStateStoreMap.create(keySchema, numColsPrefixKey)
-    if (version > 0) {
-      newMap.putAll(loadMap(version))
+    try {
+      if (version < 0) {
+        throw QueryExecutionErrors.unexpectedStateStoreVersion(version)
+      }
+      val newMap = HDFSBackedStateStoreMap.create(keySchema, numColsPrefixKey)
+      if (version > 0) {
+        newMap.putAll(loadMap(version))
+      }
+      newMap
     }
-    newMap
+    catch {
+      case e: Throwable => throw QueryExecutionErrors.cannotLoadStore(e)
+    }
   }
 
   override def init(
@@ -457,8 +464,7 @@ private[sql] class HDFSBackedStateStoreProvider extends StateStoreProvider with 
       fm.open(fileToRead)
     } catch {
       case f: FileNotFoundException =>
-        throw new IllegalStateException(
-          s"Error reading delta file $fileToRead of $this: $fileToRead does not exist", f)
+        throw QueryExecutionErrors.failedToReadDeltaFileNotExistsError(fileToRead, toString(), f)
     }
     try {
       input = decompressStream(sourceStream)
@@ -469,7 +475,8 @@ private[sql] class HDFSBackedStateStoreProvider extends StateStoreProvider with 
         if (keySize == -1) {
           eof = true
         } else if (keySize < 0) {
-          throw QueryExecutionErrors.failedToReadDeltaFileError(fileToRead, toString(), keySize)
+          throw QueryExecutionErrors.failedToReadDeltaFileKeySizeError(
+            fileToRead, toString(), keySize)
         } else {
           val keyRowBuffer = new Array[Byte](keySize)
           ByteStreams.readFully(input, keyRowBuffer, 0, keySize)
@@ -542,13 +549,19 @@ private[sql] class HDFSBackedStateStoreProvider extends StateStoreProvider with 
       rawStream: CancellableFSDataOutputStream): Unit = {
     try {
       if (rawStream != null) rawStream.cancel()
-      JavaUtils.closeQuietly(compressedStream)
+      IOUtils.closeQuietly(compressedStream)
     } catch {
+      // Closing the compressedStream causes the stream to write/flush flush data into the
+      // rawStream. Since the rawStream is already closed, there may be errors.
+      // Usually its an IOException. However, Hadoop's RawLocalFileSystem wraps
+      // IOException into FSError.
       case e: FSError if e.getCause.isInstanceOf[IOException] =>
-        // Closing the compressedStream causes the stream to write/flush flush data into the
-        // rawStream. Since the rawStream is already closed, there may be errors.
-        // Usually its an IOException. However, Hadoop's RawLocalFileSystem wraps
-        // IOException into FSError.
+
+      // SPARK-42668 - Catch and log any other exception thrown while trying to cancel
+      // raw stream or close compressed stream.
+      case NonFatal(ex) =>
+        logInfo(s"Failed to cancel delta file for provider=$stateStoreId " +
+          s"with exception=$ex")
     }
   }
 
@@ -566,8 +579,8 @@ private[sql] class HDFSBackedStateStoreProvider extends StateStoreProvider with 
         if (keySize == -1) {
           eof = true
         } else if (keySize < 0) {
-          throw QueryExecutionErrors.failedToReadSnapshotFileError(
-            fileToRead, toString(), s"key size cannot be $keySize")
+          throw QueryExecutionErrors.failedToReadSnapshotFileKeySizeError(
+            fileToRead, toString(), keySize)
         } else {
           val keyRowBuffer = new Array[Byte](keySize)
           ByteStreams.readFully(input, keyRowBuffer, 0, keySize)
@@ -577,8 +590,8 @@ private[sql] class HDFSBackedStateStoreProvider extends StateStoreProvider with 
 
           val valueSize = input.readInt()
           if (valueSize < 0) {
-            throw QueryExecutionErrors.failedToReadSnapshotFileError(
-              fileToRead, toString(), s"value size cannot be $valueSize")
+            throw QueryExecutionErrors.failedToReadSnapshotFileValueSizeError(
+              fileToRead, toString(), valueSize)
           } else {
             val valueRowBuffer = new Array[Byte](valueSize)
             ByteStreams.readFully(input, valueRowBuffer, 0, valueSize)

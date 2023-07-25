@@ -18,7 +18,7 @@
 package org.apache.spark.sql.catalyst.catalog
 
 import java.net.URI
-import java.time.ZoneOffset
+import java.time.{ZoneId, ZoneOffset}
 import java.util.Date
 
 import scala.collection.mutable
@@ -30,14 +30,15 @@ import org.json4s.jackson.JsonMethods._
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, InternalRow, SQLConfHelper, TableIdentifier}
-import org.apache.spark.sql.catalyst.analysis.MultiInstanceRelation
+import org.apache.spark.sql.catalyst.analysis.{MultiInstanceRelation, UnresolvedLeafNode}
 import org.apache.spark.sql.catalyst.catalog.CatalogTable.VIEW_STORING_ANALYZED_PLAN
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeMap, AttributeReference, Cast, ExprId, Literal}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.plans.logical.statsEstimation.EstimationUtils
+import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.catalyst.util._
 import org.apache.spark.sql.connector.catalog.CatalogManager
-import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryExecutionErrors}
+import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
@@ -119,7 +120,8 @@ case class CatalogTablePartition(
     map.put("Partition Values", s"[$specString]")
     map ++= storage.toLinkedHashMap
     if (parameters.nonEmpty) {
-      map.put("Partition Parameters", s"{${parameters.map(p => p._1 + "=" + p._2).mkString(", ")}}")
+      map.put("Partition Parameters", s"{" +
+        s"${SQLConf.get.redactOptions(parameters).map(p => p._1 + "=" + p._2).mkString(", ")}}")
     }
     map.put("Created Time", new Date(createTime).toString)
     val lastAccess = {
@@ -383,15 +385,16 @@ case class CatalogTable(
 
   def toLinkedHashMap: mutable.LinkedHashMap[String, String] = {
     val map = new mutable.LinkedHashMap[String, String]()
-    val tableProperties = properties
-      .filterKeys(!_.startsWith(VIEW_PREFIX))
-      .toSeq.sortBy(_._1)
-      .map(p => p._1 + "=" + p._2).mkString("[", ", ", "]")
+    val tableProperties =
+      SQLConf.get.redactOptions(properties.filterKeys(!_.startsWith(VIEW_PREFIX)).toMap)
+        .toSeq.sortBy(_._1)
+        .map(p => p._1 + "=" + p._2)
     val partitionColumns = partitionColumnNames.map(quoteIdentifier).mkString("[", ", ", "]")
     val lastAccess = {
       if (lastAccessTime <= 0) "UNKNOWN" else new Date(lastAccessTime).toString
     }
 
+    identifier.catalog.foreach(map.put("Catalog", _))
     identifier.database.foreach(map.put("Database", _))
     map.put("Table", identifier.table)
     if (owner != null && owner.nonEmpty) map.put("Owner", owner)
@@ -414,7 +417,9 @@ case class CatalogTable(
       }
     }
 
-    if (properties.nonEmpty) map.put("Table Properties", tableProperties)
+    if (tableProperties.nonEmpty) {
+      map.put("Table Properties", tableProperties.mkString("[", ", ", "]"))
+    }
     stats.foreach(s => map.put("Statistics", s.simpleString))
     map ++= storage.toLinkedHashMap
     if (tracksPartitionsInCatalog) map.put("Partition Provider", "Catalog")
@@ -492,21 +497,20 @@ object CatalogTable {
 
   def readLargeTableProp(props: Map[String, String], key: String): Option[String] = {
     props.get(key).orElse {
-      if (props.filterKeys(_.startsWith(key)).isEmpty) {
-        None
-      } else {
-        val numParts = props.get(s"$key.numParts")
-        if (numParts.isEmpty) {
-          throw QueryCompilationErrors.cannotReadCorruptedTablePropertyError(key)
-        } else {
-          val parts = (0 until numParts.get.toInt).map { index =>
-            props.getOrElse(s"$key.part.$index", {
-              throw QueryCompilationErrors.cannotReadCorruptedTablePropertyError(
-                key, s"Missing part $index, $numParts parts are expected.")
-            })
-          }
-          Some(parts.mkString)
+      if (props.exists { case (mapKey, _) => mapKey.startsWith(key) }) {
+        props.get(s"$key.numParts") match {
+          case None => throw QueryCompilationErrors.insufficientTablePropertyError(key)
+          case Some(numParts) =>
+            val parts = (0 until numParts.toInt).map { index =>
+              val keyPart = s"$key.part.$index"
+              props.getOrElse(keyPart, {
+                throw QueryCompilationErrors.insufficientTablePropertyPartError(keyPart, numParts)
+              })
+            }
+            Some(parts.mkString)
         }
+      } else {
+        None
       }
     }
   }
@@ -654,11 +658,16 @@ object CatalogColumnStat extends Logging {
 
   val VERSION = 2
 
-  private def getTimestampFormatter(isParsing: Boolean): TimestampFormatter = {
+  def getTimestampFormatter(
+      isParsing: Boolean,
+      format: String = "yyyy-MM-dd HH:mm:ss.SSSSSS",
+      zoneId: ZoneId = ZoneOffset.UTC,
+      forTimestampNTZ: Boolean = false): TimestampFormatter = {
     TimestampFormatter(
-      format = "yyyy-MM-dd HH:mm:ss.SSSSSS",
-      zoneId = ZoneOffset.UTC,
-      isParsing = isParsing)
+      format = format,
+      zoneId = zoneId,
+      isParsing = isParsing,
+      forTimestampNTZ = forTimestampNTZ)
   }
 
   /**
@@ -672,6 +681,8 @@ object CatalogColumnStat extends Logging {
       case TimestampType if version == 1 =>
         DateTimeUtils.fromJavaTimestamp(java.sql.Timestamp.valueOf(s))
       case TimestampType => getTimestampFormatter(isParsing = true).parse(s)
+      case TimestampNTZType =>
+        getTimestampFormatter(isParsing = true, forTimestampNTZ = true).parse(s)
       case ByteType => s.toByte
       case ShortType => s.toShort
       case IntegerType => s.toInt
@@ -695,6 +706,9 @@ object CatalogColumnStat extends Logging {
     val externalValue = dataType match {
       case DateType => DateFormatter().format(v.asInstanceOf[Int])
       case TimestampType => getTimestampFormatter(isParsing = false).format(v.asInstanceOf[Long])
+      case TimestampNTZType =>
+        getTimestampFormatter(isParsing = false, forTimestampNTZ = true)
+          .format(v.asInstanceOf[Long])
       case BooleanType | _: IntegralType | FloatType | DoubleType => v
       case _: DecimalType => v.asInstanceOf[Decimal].toJavaBigDecimal
       // This version of Spark does not use min/max for binary/string types so we ignore it.
@@ -776,10 +790,8 @@ object CatalogTypes {
 case class UnresolvedCatalogRelation(
     tableMeta: CatalogTable,
     options: CaseInsensitiveStringMap = CaseInsensitiveStringMap.empty(),
-    override val isStreaming: Boolean = false) extends LeafNode {
+    override val isStreaming: Boolean = false) extends UnresolvedLeafNode {
   assert(tableMeta.identifier.database.isDefined)
-  override lazy val resolved: Boolean = false
-  override def output: Seq[Attribute] = Nil
 }
 
 /**
@@ -789,12 +801,9 @@ case class UnresolvedCatalogRelation(
  */
 case class TemporaryViewRelation(
     tableMeta: CatalogTable,
-    plan: Option[LogicalPlan] = None) extends LeafNode {
+    plan: Option[LogicalPlan] = None) extends UnresolvedLeafNode {
   require(plan.isEmpty ||
     (plan.get.resolved && tableMeta.properties.contains(VIEW_STORING_ANALYZED_PLAN)))
-
-  override lazy val resolved: Boolean = false
-  override def output: Seq[Attribute] = Nil
 }
 
 /**
@@ -810,8 +819,8 @@ case class HiveTableRelation(
     @transient prunedPartitions: Option[Seq[CatalogTablePartition]] = None)
   extends LeafNode with MultiInstanceRelation {
   assert(tableMeta.identifier.database.isDefined)
-  assert(tableMeta.partitionSchema.sameType(partitionCols.toStructType))
-  assert(tableMeta.dataSchema.sameType(dataCols.toStructType))
+  assert(DataTypeUtils.sameType(tableMeta.partitionSchema, partitionCols.toStructType))
+  assert(DataTypeUtils.sameType(tableMeta.dataSchema, dataCols.toStructType))
 
   // The partition column should always appear after data columns.
   override def output: Seq[AttributeReference] = dataCols ++ partitionCols
@@ -833,7 +842,7 @@ case class HiveTableRelation(
     tableMeta.stats.map(_.toPlanStats(output, conf.cboEnabled || conf.planStatsEnabled))
       .orElse(tableStats)
       .getOrElse {
-      throw QueryExecutionErrors.tableStatsNotSpecifiedError
+      throw new IllegalStateException("Table stats must be specified.")
     }
   }
 

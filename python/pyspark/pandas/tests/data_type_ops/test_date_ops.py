@@ -16,16 +16,17 @@
 #
 
 import datetime
+import unittest
+from distutils.version import LooseVersion
 
 import pandas as pd
 from pandas.api.types import CategoricalDtype
 
 from pyspark import pandas as ps
-from pyspark.pandas.tests.data_type_ops.testing_utils import TestCasesUtils
-from pyspark.testing.pandasutils import PandasOnSparkTestCase
+from pyspark.pandas.tests.data_type_ops.testing_utils import OpsTestBase
 
 
-class DateOpsTest(PandasOnSparkTestCase, TestCasesUtils):
+class DateOpsTestsMixin:
     @property
     def pser(self):
         return pd.Series(
@@ -62,6 +63,10 @@ class DateOpsTest(PandasOnSparkTestCase, TestCasesUtils):
         for psser in self.pssers:
             self.assertRaises(TypeError, lambda: self.psser + psser)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43571): Enable DateOpsTests.test_sub for pandas 2.0.0.",
+    )
     def test_sub(self):
         self.assertRaises(TypeError, lambda: self.psser - "x")
         self.assertRaises(TypeError, lambda: self.psser - 1)
@@ -112,17 +117,21 @@ class DateOpsTest(PandasOnSparkTestCase, TestCasesUtils):
 
     def test_pow(self):
         self.assertRaises(TypeError, lambda: self.psser ** "x")
-        self.assertRaises(TypeError, lambda: self.psser ** 1)
-        self.assertRaises(TypeError, lambda: self.psser ** self.some_date)
+        self.assertRaises(TypeError, lambda: self.psser**1)
+        self.assertRaises(TypeError, lambda: self.psser**self.some_date)
 
         for psser in self.pssers:
-            self.assertRaises(TypeError, lambda: self.psser ** psser)
+            self.assertRaises(TypeError, lambda: self.psser**psser)
 
     def test_radd(self):
         self.assertRaises(TypeError, lambda: "x" + self.psser)
         self.assertRaises(TypeError, lambda: 1 + self.psser)
         self.assertRaises(TypeError, lambda: self.some_date + self.psser)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43570): Enable DateOpsTests.test_rsub for pandas 2.0.0.",
+    )
     def test_rsub(self):
         self.assertRaises(TypeError, lambda: "x" - self.psser)
         self.assertRaises(TypeError, lambda: 1 - self.psser)
@@ -152,8 +161,8 @@ class DateOpsTest(PandasOnSparkTestCase, TestCasesUtils):
 
     def test_rpow(self):
         self.assertRaises(TypeError, lambda: "x" ** self.psser)
-        self.assertRaises(TypeError, lambda: 1 ** self.psser)
-        self.assertRaises(TypeError, lambda: self.some_date ** self.psser)
+        self.assertRaises(TypeError, lambda: 1**self.psser)
+        self.assertRaises(TypeError, lambda: self.some_date**self.psser)
 
     def test_and(self):
         self.assertRaises(TypeError, lambda: self.psser & True)
@@ -177,7 +186,7 @@ class DateOpsTest(PandasOnSparkTestCase, TestCasesUtils):
         data = [datetime.date(1994, 1, 31), datetime.date(1994, 2, 1), datetime.date(1994, 2, 2)]
         pser = pd.Series(data)
         psser = ps.Series(data)
-        self.assert_eq(pser, psser.to_pandas())
+        self.assert_eq(pser, psser._to_pandas())
         self.assert_eq(ps.from_pandas(pser), psser)
 
     def test_isnull(self):
@@ -212,8 +221,8 @@ class DateOpsTest(PandasOnSparkTestCase, TestCasesUtils):
 
     def test_lt(self):
         pdf, psdf = self.date_pdf, self.date_psdf
-        self.assert_eq(pdf["this"] == pdf["that"], psdf["this"] == psdf["that"])
-        self.assert_eq(pdf["this"] == pdf["this"], psdf["this"] == psdf["this"])
+        self.assert_eq(pdf["this"] < pdf["that"], psdf["this"] < psdf["that"])
+        self.assert_eq(pdf["this"] < pdf["this"], psdf["this"] < psdf["this"])
 
     def test_le(self):
         pdf, psdf = self.date_pdf, self.date_psdf
@@ -231,12 +240,16 @@ class DateOpsTest(PandasOnSparkTestCase, TestCasesUtils):
         self.assert_eq(pdf["this"] >= pdf["this"], psdf["this"] >= psdf["this"])
 
 
+class DateOpsTests(DateOpsTestsMixin, OpsTestBase):
+    pass
+
+
 if __name__ == "__main__":
     import unittest
     from pyspark.pandas.tests.data_type_ops.test_date_ops import *  # noqa: F401
 
     try:
-        import xmlrunner  # type: ignore[import]
+        import xmlrunner
 
         testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
     except ImportError:

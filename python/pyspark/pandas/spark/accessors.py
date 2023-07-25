@@ -20,21 +20,24 @@ Spark related features. Usually, the features here are missing in pandas
 but Spark has it.
 """
 from abc import ABCMeta, abstractmethod
-from typing import TYPE_CHECKING, Callable, Generic, List, Optional, Union, cast
+from typing import TYPE_CHECKING, Callable, Generic, List, Optional, Union
 
 from pyspark import StorageLevel
-from pyspark.sql import Column, DataFrame as SparkDataFrame
+from pyspark.sql import Column as PySparkColumn, DataFrame as PySparkDataFrame
 from pyspark.sql.types import DataType, StructType
 
 from pyspark.pandas._typing import IndexOpsLike
 from pyspark.pandas.internal import InternalField
 
-if TYPE_CHECKING:
-    from pyspark.sql._typing import OptionalPrimitiveType  # noqa: F401 (SPARK-34943)
-    from pyspark._typing import PrimitiveType  # noqa: F401 (SPARK-34943)
+# For Supporting Spark Connect
+from pyspark.sql.utils import get_column_class, get_dataframe_class
 
-    import pyspark.pandas as ps  # noqa: F401 (SPARK-34943)
-    from pyspark.pandas.frame import CachedDataFrame  # noqa: F401 (SPARK-34943)
+if TYPE_CHECKING:
+    from pyspark.sql._typing import OptionalPrimitiveType
+    from pyspark._typing import PrimitiveType
+
+    import pyspark.pandas as ps
+    from pyspark.pandas.frame import CachedDataFrame
 
 
 class SparkIndexOpsMethods(Generic[IndexOpsLike], metaclass=ABCMeta):
@@ -55,7 +58,7 @@ class SparkIndexOpsMethods(Generic[IndexOpsLike], metaclass=ABCMeta):
         return self._data._internal.spark_column_nullable_for(self._data._column_label)
 
     @property
-    def column(self) -> Column:
+    def column(self) -> PySparkColumn:
         """
         Spark Column object representing the Series/Index.
 
@@ -64,11 +67,11 @@ class SparkIndexOpsMethods(Generic[IndexOpsLike], metaclass=ABCMeta):
         """
         return self._data._internal.spark_column_for(self._data._column_label)
 
-    def transform(self, func: Callable[[Column], Column]) -> IndexOpsLike:
+    def transform(self, func: Callable[[PySparkColumn], PySparkColumn]) -> IndexOpsLike:
         """
-        Applies a function that takes and returns a Spark column. It allows to natively
-        apply a Spark function and column APIs with the Spark column internally used
-        in Series or Index. The output length of the Spark column should be same as input's.
+        Applies a function that takes and returns a Spark column. It allows natively
+        applying a Spark function and column APIs with the Spark column internally used
+        in Series or Index. The output length of the Spark column should be the same as input's.
 
         .. note:: It requires to have the same input and output length; therefore,
             the aggregate Spark functions such as count does not work.
@@ -102,7 +105,7 @@ class SparkIndexOpsMethods(Generic[IndexOpsLike], metaclass=ABCMeta):
         2    1.098612
         Name: a, dtype: float64
 
-        >>> df.index.spark.transform(lambda c: c + 10)
+        >>> df.index.spark.transform(lambda c: c + 10)  # doctest: +SKIP
         Int64Index([10, 11, 12], dtype='int64')
 
         >>> df.a.spark.transform(lambda c: c + df.b.spark.column)
@@ -116,6 +119,7 @@ class SparkIndexOpsMethods(Generic[IndexOpsLike], metaclass=ABCMeta):
         if isinstance(self._data, MultiIndex):
             raise NotImplementedError("MultiIndex does not support spark.transform yet.")
         output = func(self._data.spark.column)
+        Column = get_column_class()
         if not isinstance(output, Column):
             raise ValueError(
                 "The output of the function [%s] should be of a "
@@ -136,20 +140,20 @@ class SparkIndexOpsMethods(Generic[IndexOpsLike], metaclass=ABCMeta):
 
 
 class SparkSeriesMethods(SparkIndexOpsMethods["ps.Series"]):
-    def apply(self, func: Callable[[Column], Column]) -> "ps.Series":
+    def apply(self, func: Callable[[PySparkColumn], PySparkColumn]) -> "ps.Series":
         """
         Applies a function that takes and returns a Spark column. It allows to natively
         apply a Spark function and column APIs with the Spark column internally used
         in Series or Index.
 
-        .. note:: It forces to lose the index and end up with using default index. It is
+        .. note:: It forces to lose the index and end up using the default index. It is
             preferred to use :meth:`Series.spark.transform` or `:meth:`DataFrame.spark.apply`
-            with specifying the `inedx_col`.
+            with specifying the `index_col`.
 
         .. note:: It does not require to have the same length of the input and output.
             However, it requires to create a new DataFrame internally which will require
             to set `compute.ops_on_diff_frames` to compute even with the same origin
-            DataFrame that is expensive, whereas :meth:`Series.spark.transform` does not
+            DataFrame is expensive, whereas :meth:`Series.spark.transform` does not
             require it.
 
         Parameters
@@ -191,6 +195,7 @@ class SparkSeriesMethods(SparkIndexOpsMethods["ps.Series"]):
         from pyspark.pandas.internal import HIDDEN_COLUMNS
 
         output = func(self._data.spark.column)
+        Column = get_column_class()
         if not isinstance(output, Column):
             raise ValueError(
                 "The output of the function [%s] should be of a "
@@ -212,7 +217,7 @@ class SparkSeriesMethods(SparkIndexOpsMethods["ps.Series"]):
 
         This function is for the workaround to avoid it.
 
-        .. note:: After analyzed, operations between the analyzed Series and the original one
+        .. note:: After analyzing, operations between the analyzed Series and the original one
             will **NOT** work without setting a config `compute.ops_on_diff_frames` to `True`.
 
         Returns
@@ -267,7 +272,7 @@ class SparkIndexMethods(SparkIndexOpsMethods["ps.Index"]):
 
         This function is for the workaround to avoid it.
 
-        .. note:: After analyzed, operations between the analyzed Series and the original one
+        .. note:: After analyzing, operations between the analyzed Series and the original one
             will **NOT** work without setting a config `compute.ops_on_diff_frames` to `True`.
 
         Returns
@@ -276,13 +281,14 @@ class SparkIndexMethods(SparkIndexOpsMethods["ps.Index"]):
 
         Examples
         --------
+        >>> import pyspark.pandas as ps
         >>> idx = ps.Index([1, 2, 3])
-        >>> idx
+        >>> idx  # doctest: +SKIP
         Int64Index([1, 2, 3], dtype='int64')
 
         The analyzed one should return the same value.
 
-        >>> idx.spark.analyzed
+        >>> idx.spark.analyzed  # doctest: +SKIP
         Int64Index([1, 2, 3], dtype='int64')
 
         However, it won't work with the same anchor Index.
@@ -293,7 +299,7 @@ class SparkIndexMethods(SparkIndexOpsMethods["ps.Index"]):
         ValueError: ... enable 'compute.ops_on_diff_frames' option.
 
         >>> with ps.option_context('compute.ops_on_diff_frames', True):
-        ...     (idx + idx.spark.analyzed).sort_values()
+        ...     (idx + idx.spark.analyzed).sort_values()  # doctest: +SKIP
         Int64Index([2, 4, 6], dtype='int64')
         """
         from pyspark.pandas.frame import DataFrame
@@ -301,7 +307,7 @@ class SparkIndexMethods(SparkIndexOpsMethods["ps.Index"]):
         return DataFrame(self._data._internal.resolved_copy).index
 
 
-class SparkFrameMethods(object):
+class SparkFrameMethods:
     """Spark related features. Usually, the features here are missing in pandas
     but Spark has it."""
 
@@ -382,7 +388,7 @@ class SparkFrameMethods(object):
         """
         self.frame(index_col).printSchema()
 
-    def frame(self, index_col: Optional[Union[str, List[str]]] = None) -> SparkDataFrame:
+    def frame(self, index_col: Optional[Union[str, List[str]]] = None) -> PySparkDataFrame:
         """
         Return the current DataFrame as a Spark DataFrame.  :meth:`DataFrame.spark.frame` is an
         alias of  :meth:`DataFrame.to_spark`.
@@ -396,7 +402,7 @@ class SparkFrameMethods(object):
         See Also
         --------
         DataFrame.to_spark
-        DataFrame.to_pandas_on_spark
+        DataFrame.pandas_api
         DataFrame.spark.frame
 
         Examples
@@ -434,13 +440,13 @@ class SparkFrameMethods(object):
         |    2|  3|  6|  9|
         +-----+---+---+---+
 
-        Keeping index column is useful when you want to call some Spark APIs and
+        Keeping an index column is useful when you want to call some Spark APIs and
         convert it back to pandas-on-Spark DataFrame without creating a default index, which
         can affect performance.
 
         >>> spark_df = df.to_spark(index_col="index")
         >>> spark_df = spark_df.filter("a == 2")
-        >>> spark_df.to_pandas_on_spark(index_col="index")  # doctest: +NORMALIZE_WHITESPACE
+        >>> spark_df.pandas_api(index_col="index")  # doctest: +NORMALIZE_WHITESPACE
                a  b  c
         index
         1      2  5  8
@@ -458,9 +464,9 @@ class SparkFrameMethods(object):
         |      2|      3|  6|  9|
         +-------+-------+---+---+
 
-        Likewise, can be converted to back to pandas-on-Spark DataFrame.
+        Can be converted back to pandas-on-Spark DataFrame.
 
-        >>> new_spark_df.to_pandas_on_spark(
+        >>> new_spark_df.pandas_api(
         ...     index_col=["index_1", "index_2"])  # doctest: +NORMALIZE_WHITESPACE
                          b  c
         index_1 index_2
@@ -514,7 +520,7 @@ class SparkFrameMethods(object):
         Yields and caches the current DataFrame.
 
         The pandas-on-Spark DataFrame is yielded as a protected resource and its corresponding
-        data is cached which gets uncached after execution goes of the context.
+        data is cached which gets uncached after execution goes off the context.
 
         If you want to specify the StorageLevel manually, use :meth:`DataFrame.spark.persist`
 
@@ -555,7 +561,7 @@ class SparkFrameMethods(object):
         from pyspark.pandas.frame import CachedDataFrame
 
         self._psdf._update_internal_frame(
-            self._psdf._internal.resolved_copy, requires_same_anchor=False
+            self._psdf._internal.resolved_copy, check_same_anchor=False
         )
         return CachedDataFrame(self._psdf._internal)
 
@@ -564,10 +570,10 @@ class SparkFrameMethods(object):
     ) -> "CachedDataFrame":
         """
         Yields and caches the current DataFrame with a specific StorageLevel.
-        If a StogeLevel is not given, the `MEMORY_AND_DISK` level is used by default like PySpark.
+        If a StorageLevel is not given, the `MEMORY_AND_DISK` level is used by default like PySpark.
 
         The pandas-on-Spark DataFrame is yielded as a protected resource and its corresponding
-        data is cached which gets uncached after execution goes of the context.
+        data is cached which gets uncached after execution goes off the context.
 
         See Also
         --------
@@ -633,7 +639,7 @@ class SparkFrameMethods(object):
         from pyspark.pandas.frame import CachedDataFrame
 
         self._psdf._update_internal_frame(
-            self._psdf._internal.resolved_copy, requires_same_anchor=False
+            self._psdf._internal.resolved_copy, check_same_anchor=False
         )
         return CachedDataFrame(self._psdf._internal, storage_level=storage_level)
 
@@ -743,7 +749,7 @@ class SparkFrameMethods(object):
         >>> df.to_table('%s.my_table' % db, partition_cols='date')
         """
         if "options" in options and isinstance(options.get("options"), dict) and len(options) == 1:
-            options = options.get("options")  # type: ignore
+            options = options.get("options")  # type: ignore[assignment]
 
         self._psdf.spark.frame(index_col=index_col).write.saveAsTable(
             name=name, format=format, mode=mode, partitionBy=partition_cols, **options
@@ -774,7 +780,7 @@ class SparkFrameMethods(object):
             - 'json'
             - 'csv'
         mode : str {'append', 'overwrite', 'ignore', 'error', 'errorifexists'}, default
-            'overwrite'. Specifies the behavior of the save operation when data already.
+            'overwrite'. Specifies the behavior of the save operation when data already exists.
 
             - 'append': Append the new data to existing data.
             - 'overwrite': Overwrite existing data.
@@ -816,7 +822,7 @@ class SparkFrameMethods(object):
         >>> df.to_spark_io(path='%s/to_spark_io/foo.json' % path, format='json')
         """
         if "options" in options and isinstance(options.get("options"), dict) and len(options) == 1:
-            options = options.get("options")  # type: ignore
+            options = options.get("options")  # type: ignore[assignment]
 
         self._psdf.spark.frame(index_col=index_col).write.save(
             path=path, format=format, mode=mode, partitionBy=partition_cols, **options
@@ -879,7 +885,7 @@ class SparkFrameMethods(object):
 
     def apply(
         self,
-        func: Callable[[SparkDataFrame], SparkDataFrame],
+        func: Callable[[PySparkDataFrame], PySparkDataFrame],
         index_col: Optional[Union[str, List[str]]] = None,
     ) -> "ps.DataFrame":
         """
@@ -893,7 +899,7 @@ class SparkFrameMethods(object):
             expensive in general.
 
         .. note:: it will lose column labels. This is a synonym of
-            ``func(psdf.to_spark(index_col)).to_pandas_on_spark(index_col)``.
+            ``func(psdf.to_spark(index_col)).pandas_api(index_col)``.
 
         Parameters
         ----------
@@ -936,13 +942,13 @@ class SparkFrameMethods(object):
         2  3      1
         """
         output = func(self.frame(index_col))
+        SparkDataFrame = get_dataframe_class()
         if not isinstance(output, SparkDataFrame):
             raise ValueError(
                 "The output of the function [%s] should be of a "
                 "pyspark.sql.DataFrame; however, got [%s]." % (func, type(output))
             )
-        psdf = output.to_pandas_on_spark(index_col)  # type: ignore
-        return cast("ps.DataFrame", psdf)
+        return output.pandas_api(index_col)
 
     def repartition(self, num_partitions: int) -> "ps.DataFrame":
         """
@@ -1122,7 +1128,7 @@ class SparkFrameMethods(object):
 
         This function is for the workaround to avoid it.
 
-        .. note:: After analyzed, operations between the analyzed DataFrame and the original one
+        .. note:: After analysis, operations between the analyzed DataFrame and the original one
             will **NOT** work without setting a config `compute.ops_on_diff_frames` to `True`.
 
         Returns
@@ -1207,7 +1213,7 @@ class CachedSparkFrameMethods(SparkFrameMethods):
     def unpersist(self) -> None:
         """
         The `unpersist` function is used to uncache the pandas-on-Spark DataFrame when it
-        is not used with `with` statement.
+        is not used with the `with` statement.
 
         Returns
         -------

@@ -25,14 +25,15 @@ import org.apache.spark.annotation.Evolving
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
 import org.apache.spark.sql.catalyst.analysis.UnresolvedRelation
-import org.apache.spark.sql.catalyst.expressions.ExprUtils
 import org.apache.spark.sql.catalyst.streaming.StreamingRelationV2
+import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
 import org.apache.spark.sql.catalyst.util.{CaseInsensitiveMap, CharVarcharUtils}
 import org.apache.spark.sql.connector.catalog.{SupportsRead, TableProvider}
 import org.apache.spark.sql.connector.catalog.TableCapability._
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.execution.command.DDLUtils
 import org.apache.spark.sql.execution.datasources.DataSource
+import org.apache.spark.sql.execution.datasources.json.JsonUtils.checkJsonSchema
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Utils, FileDataSourceV2}
 import org.apache.spark.sql.execution.streaming.StreamingRelation
 import org.apache.spark.sql.sources.StreamSourceProvider
@@ -180,11 +181,12 @@ final class DataStreamReader private[sql](sparkSession: SparkSession) extends Lo
         import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Implicits._
         table match {
           case _: SupportsRead if table.supportsAny(MICRO_BATCH_READ, CONTINUOUS_READ) =>
+            import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
             Dataset.ofRows(
               sparkSession,
               StreamingRelationV2(
                 Some(provider), source, table, dsOptions,
-                table.schema.toAttributes, None, None, v1Relation))
+                toAttributes(table.columns.asSchema), None, None, v1Relation))
 
           // fallback to v1
           // TODO (SPARK-27483): we should move this fallback logic to an analyzer rule.
@@ -232,7 +234,7 @@ final class DataStreamReader private[sql](sparkSession: SparkSession) extends Lo
    * @since 2.0.0
    */
   def json(path: String): DataFrame = {
-    userSpecifiedSchema.foreach(ExprUtils.checkJsonSchema(_).foreach(throw _))
+    userSpecifiedSchema.foreach(checkJsonSchema)
     format("json").load(path)
   }
 

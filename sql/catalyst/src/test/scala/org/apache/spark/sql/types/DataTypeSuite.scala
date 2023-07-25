@@ -20,8 +20,10 @@ package org.apache.spark.sql.types
 import com.fasterxml.jackson.core.JsonParseException
 
 import org.apache.spark.{SparkException, SparkFunSuite}
+import org.apache.spark.sql.catalyst.analysis.{caseInsensitiveResolution, caseSensitiveResolution}
 import org.apache.spark.sql.catalyst.parser.CatalystSqlParser
-import org.apache.spark.sql.catalyst.util.StringUtils.StringConcat
+import org.apache.spark.sql.catalyst.types.DataTypeUtils
+import org.apache.spark.sql.catalyst.util.StringConcat
 import org.apache.spark.sql.types.DataTypeTestUtils.{dayTimeIntervalTypes, yearMonthIntervalTypes}
 
 class DataTypeSuite extends SparkFunSuite {
@@ -152,11 +154,14 @@ class DataTypeSuite extends SparkFunSuite {
     val right = StructType(
       StructField("b", LongType) :: Nil)
 
-    val message = intercept[SparkException] {
-      left.merge(right)
-    }.getMessage
-    assert(message.equals("Failed to merge fields 'b' and 'b'. " +
-      "Failed to merge incompatible data types float and bigint"))
+    checkError(
+      exception = intercept[SparkException] {
+        left.merge(right)
+      },
+      errorClass = "CANNOT_MERGE_INCOMPATIBLE_DATA_TYPE",
+      parameters = Map("left" -> "\"FLOAT\"", "right" -> "\"BIGINT\""
+      )
+    )
   }
 
   test("existsRecursively") {
@@ -187,6 +192,12 @@ class DataTypeSuite extends SparkFunSuite {
     assert(DataType.fromJson("\"null\"") == NullType)
   }
 
+  test("SPARK-42723: Parse timestamp_ltz as TimestampType") {
+    assert(DataType.fromJson("\"timestamp_ltz\"") == TimestampType)
+    val expectedStructType = StructType(Seq(StructField("ts", TimestampType)))
+    assert(DataType.fromDDL("ts timestamp_ltz") == expectedStructType)
+  }
+
   def checkDataTypeFromJson(dataType: DataType): Unit = {
     test(s"from Json - $dataType") {
       assert(DataType.fromJson(dataType.json) === dataType)
@@ -197,7 +208,7 @@ class DataTypeSuite extends SparkFunSuite {
     test(s"from DDL - $dataType") {
       val parsed = StructType.fromDDL(s"a ${dataType.sql}")
       val expected = new StructType().add("a", dataType)
-      assert(parsed.sameType(expected))
+      assert(DataTypeUtils.sameType(parsed, expected))
     }
   }
 
@@ -236,6 +247,9 @@ class DataTypeSuite extends SparkFunSuite {
 
   checkDataTypeFromJson(TimestampType)
   checkDataTypeFromDDL(TimestampType)
+
+  checkDataTypeFromJson(TimestampNTZType)
+  checkDataTypeFromDDL(TimestampNTZType)
 
   checkDataTypeFromJson(StringType)
   checkDataTypeFromDDL(StringType)
@@ -583,6 +597,69 @@ class DataTypeSuite extends SparkFunSuite {
       ArrayType(IntegerType, true), ArrayType(IntegerType, true), true),
     true,
     ignoreNullability = true)
+
+  def checkEqualsStructurallyByName(
+      from: DataType,
+      to: DataType,
+      expected: Boolean,
+      caseSensitive: Boolean = false): Unit = {
+    val testName = s"SPARK-36918: equalsStructurallyByName: (from: $from, to: $to, " +
+        s"caseSensitive: $caseSensitive)"
+
+    val resolver = if (caseSensitive) {
+      caseSensitiveResolution
+    } else {
+      caseInsensitiveResolution
+    }
+
+    test(testName) {
+      assert(DataType.equalsStructurallyByName(from, to, resolver) === expected)
+    }
+  }
+
+  checkEqualsStructurallyByName(
+    ArrayType(
+      ArrayType(IntegerType)),
+    ArrayType(
+      ArrayType(IntegerType)),
+    true)
+
+  // Type doesn't matter
+  checkEqualsStructurallyByName(BooleanType, BooleanType, true)
+  checkEqualsStructurallyByName(BooleanType, IntegerType, true)
+  checkEqualsStructurallyByName(IntegerType, LongType, true)
+
+  checkEqualsStructurallyByName(
+    new StructType().add("f1", IntegerType).add("f2", IntegerType),
+    new StructType().add("f1", LongType).add("f2", StringType),
+    true)
+
+  checkEqualsStructurallyByName(
+    new StructType().add("f1", IntegerType).add("f2", IntegerType),
+    new StructType().add("f2", LongType).add("f1", StringType),
+    false)
+
+  checkEqualsStructurallyByName(
+    new StructType().add("f1", IntegerType).add("f", new StructType().add("f2", StringType)),
+    new StructType().add("f1", LongType).add("f", new StructType().add("f2", BooleanType)),
+    true)
+
+  checkEqualsStructurallyByName(
+    new StructType().add("f1", IntegerType).add("f", new StructType().add("f2", StringType)),
+    new StructType().add("f", new StructType().add("f2", BooleanType)).add("f1", LongType),
+    false)
+
+  checkEqualsStructurallyByName(
+    new StructType().add("f1", IntegerType).add("f2", IntegerType),
+    new StructType().add("F1", LongType).add("F2", StringType),
+    true,
+    caseSensitive = false)
+
+  checkEqualsStructurallyByName(
+    new StructType().add("f1", IntegerType).add("f2", IntegerType),
+    new StructType().add("F1", LongType).add("F2", StringType),
+    false,
+    caseSensitive = true)
 
   test("SPARK-25031: MapType should produce current formatted string for complex types") {
     val keyType: DataType = StructType(Seq(

@@ -31,10 +31,6 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotSame;
-import static org.junit.Assert.assertTrue;
-
 import org.apache.spark.network.TestUtils;
 import org.apache.spark.network.TransportContext;
 import org.apache.spark.network.server.NoOpRpcHandler;
@@ -44,6 +40,8 @@ import org.apache.spark.network.util.ConfigProvider;
 import org.apache.spark.network.util.MapConfigProvider;
 import org.apache.spark.network.util.JavaUtils;
 import org.apache.spark.network.util.TransportConf;
+
+import static org.junit.Assert.*;
 
 public class TransportClientFactorySuite {
   private TransportConf conf;
@@ -218,11 +216,12 @@ public class TransportClientFactorySuite {
     }
   }
 
-  @Test(expected = IOException.class)
-  public void closeFactoryBeforeCreateClient() throws IOException, InterruptedException {
+  @Test
+  public void closeFactoryBeforeCreateClient() {
     TransportClientFactory factory = context.createClientFactory();
     factory.close();
-    factory.createClient(TestUtils.getLocalHost(), server1.getPort());
+    Assert.assertThrows(IOException.class,
+      () -> factory.createClient(TestUtils.getLocalHost(), server1.getPort()));
   }
 
   @Test
@@ -231,12 +230,36 @@ public class TransportClientFactorySuite {
     TransportServer server = context.createServer();
     int unreachablePort = server.getPort();
     server.close();
-    try {
-      factory.createClient(TestUtils.getLocalHost(), unreachablePort, true);
-    } catch (Exception e) {
-      assert(e instanceof IOException);
-    }
+    Assert.assertThrows(IOException.class,
+      () -> factory.createClient(TestUtils.getLocalHost(), unreachablePort, true));
     Assert.assertThrows("fail this connection directly", IOException.class,
       () -> factory.createClient(TestUtils.getLocalHost(), unreachablePort, true));
+  }
+
+  @Test
+  public void unlimitedConnectionAndCreationTimeouts() throws IOException, InterruptedException {
+    Map<String, String> configMap = new HashMap<>();
+    configMap.put("spark.shuffle.io.connectionTimeout", "-1");
+    configMap.put("spark.shuffle.io.connectionCreationTimeout", "-1");
+    TransportConf conf = new TransportConf("shuffle", new MapConfigProvider(configMap));
+    RpcHandler rpcHandler = new NoOpRpcHandler();
+    try (TransportContext ctx = new TransportContext(conf, rpcHandler, true);
+      TransportClientFactory factory = ctx.createClientFactory()){
+      TransportClient c1 = factory.createClient(TestUtils.getLocalHost(), server1.getPort());
+      assertTrue(c1.isActive());
+      long expiredTime = System.currentTimeMillis() + 5000;
+      while (c1.isActive() && System.currentTimeMillis() < expiredTime) {
+        Thread.sleep(10);
+      }
+      assertTrue(c1.isActive());
+      // When connectionCreationTimeout is unlimited, the connection shall be able to
+      // fail when the server is not reachable.
+      TransportServer server = ctx.createServer();
+      int unreachablePort = server.getPort();
+      JavaUtils.closeQuietly(server);
+      IOException exception = Assert.assertThrows(IOException.class,
+          () -> factory.createClient(TestUtils.getLocalHost(), unreachablePort, true));
+      assertNotEquals(exception.getCause(), null);
+    }
   }
 }

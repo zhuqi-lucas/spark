@@ -36,16 +36,15 @@ import org.apache.hadoop.yarn.api._
 import org.apache.hadoop.yarn.api.records._
 import org.apache.hadoop.yarn.conf.YarnConfiguration
 import org.apache.hadoop.yarn.exceptions.ApplicationAttemptNotFoundException
-import org.apache.hadoop.yarn.util.{ConverterUtils, Records}
+import org.apache.hadoop.yarn.util.Records
 
 import org.apache.spark._
-import org.apache.spark.deploy.SparkHadoopUtil
+import org.apache.spark.deploy.{ExecutorFailureTracker, SparkHadoopUtil}
 import org.apache.spark.deploy.history.HistoryServer
 import org.apache.spark.deploy.security.HadoopDelegationTokenManager
 import org.apache.spark.deploy.yarn.config._
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
-import org.apache.spark.internal.config.Streaming.STREAMING_DYN_ALLOCATION_MAX_EXECUTORS
 import org.apache.spark.internal.config.UI._
 import org.apache.spark.metrics.{MetricsSystem, MetricsSystemInstances}
 import org.apache.spark.resource.ResourceProfile
@@ -100,25 +99,7 @@ private[spark] class ApplicationMaster(
 
   private val client = new YarnRMClient()
 
-  // Default to twice the number of executors (twice the maximum number of executors if dynamic
-  // allocation is enabled), with a minimum of 3.
-
-  private val maxNumExecutorFailures = {
-    val effectiveNumExecutors =
-      if (Utils.isStreamingDynamicAllocationEnabled(sparkConf)) {
-        sparkConf.get(STREAMING_DYN_ALLOCATION_MAX_EXECUTORS)
-      } else if (Utils.isDynamicAllocationEnabled(sparkConf)) {
-        sparkConf.get(DYN_ALLOCATION_MAX_EXECUTORS)
-      } else {
-        sparkConf.get(EXECUTOR_INSTANCES).getOrElse(0)
-      }
-    // By default, effectiveNumExecutors is Int.MaxValue if dynamic allocation is enabled. We need
-    // avoid the integer overflow here.
-    val defaultMaxNumExecutorFailures = math.max(3,
-      if (effectiveNumExecutors > Int.MaxValue / 2) Int.MaxValue else (2 * effectiveNumExecutors))
-
-    sparkConf.get(MAX_EXECUTOR_FAILURES).getOrElse(defaultMaxNumExecutorFailures)
-  }
+  private val maxNumExecutorFailures = ExecutorFailureTracker.maxNumExecutorFailures(sparkConf)
 
   @volatile private var exitCode = 0
   @volatile private var unregistered = false
@@ -173,7 +154,7 @@ private[spark] class ApplicationMaster(
       val amJarRsrc = Records.newRecord(classOf[LocalResource])
       amJarRsrc.setType(rtype)
       amJarRsrc.setVisibility(LocalResourceVisibility.valueOf(vis))
-      amJarRsrc.setResource(ConverterUtils.getYarnUrlFromURI(uri))
+      amJarRsrc.setResource(URL.fromURI(uri))
       amJarRsrc.setTimestamp(timestamp.toLong)
       amJarRsrc.setSize(size.toLong)
 
@@ -187,7 +168,7 @@ private[spark] class ApplicationMaster(
     val visibilities = distCacheConf.get(CACHED_FILES_VISIBILITIES)
     val resTypes = distCacheConf.get(CACHED_FILES_TYPES)
 
-    for (i <- 0 to distFiles.size - 1) {
+    for (i <- distFiles.indices) {
       val resType = LocalResourceType.valueOf(resTypes(i))
       setupDistributedCache(distFiles(i), resType, timeStamps(i).toString, fileSizes(i).toString,
       visibilities(i))
@@ -240,29 +221,43 @@ private[spark] class ApplicationMaster(
 
       logInfo("ApplicationAttemptId: " + appAttemptId)
 
+      // During shutdown, we may not be able to create an FileSystem object. So, pre-create here.
+      val stagingDirPath = new Path(System.getenv("SPARK_YARN_STAGING_DIR"))
+      val stagingDirFs = stagingDirPath.getFileSystem(yarnConf)
       // This shutdown hook should run *after* the SparkContext is shut down.
       val priority = ShutdownHookManager.SPARK_CONTEXT_SHUTDOWN_PRIORITY - 1
       ShutdownHookManager.addShutdownHook(priority) { () =>
-        val maxAppAttempts = client.getMaxRegAttempts(sparkConf, yarnConf)
-        val isLastAttempt = appAttemptId.getAttemptId() >= maxAppAttempts
+        try {
+          val maxAppAttempts = client.getMaxRegAttempts(sparkConf, yarnConf)
+          val isLastAttempt = appAttemptId.getAttemptId() >= maxAppAttempts
 
-        if (!finished) {
-          // The default state of ApplicationMaster is failed if it is invoked by shut down hook.
-          // This behavior is different compared to 1.x version.
-          // If user application is exited ahead of time by calling System.exit(N), here mark
-          // this application as failed with EXIT_EARLY. For a good shutdown, user shouldn't call
-          // System.exit(0) to terminate the application.
-          finish(finalStatus,
-            ApplicationMaster.EXIT_EARLY,
-            "Shutdown hook called before final status was reported.")
-        }
-
-        if (!unregistered) {
-          // we only want to unregister if we don't want the RM to retry
-          if (finalStatus == FinalApplicationStatus.SUCCEEDED || isLastAttempt) {
-            unregister(finalStatus, finalMsg)
-            cleanupStagingDir(new Path(System.getenv("SPARK_YARN_STAGING_DIR")))
+          if (!finished) {
+            // The default state of ApplicationMaster is failed if it is invoked by shut down hook.
+            // This behavior is different compared to 1.x version.
+            // If user application is exited ahead of time by calling System.exit(N), here mark
+            // this application as failed with EXIT_EARLY. For a good shutdown, user shouldn't call
+            // System.exit(0) to terminate the application.
+            finish(finalStatus,
+              ApplicationMaster.EXIT_EARLY,
+              "Shutdown hook called before final status was reported.")
           }
+
+          if (!unregistered) {
+            // we only want to unregister if we don't want the RM to retry
+            if (isLastAttempt) {
+              cleanupStagingDir(stagingDirFs, stagingDirPath)
+              unregister(finalStatus, finalMsg)
+            } else if (finalStatus == FinalApplicationStatus.SUCCEEDED) {
+              // When it's not the last attempt, if unregister failed caused by timeout exception,
+              // YARN will rerun the application, AM should not clean staging dir before unregister
+              // success.
+              unregister(finalStatus, finalMsg)
+              cleanupStagingDir(stagingDirFs, stagingDirPath)
+            }
+          }
+        } catch {
+          case e: Throwable =>
+            logWarning("Ignoring Exception while stopping ApplicationMaster from shutdown hook", e)
         }
       }
 
@@ -308,7 +303,7 @@ private[spark] class ApplicationMaster(
           sparkConf.get(DRIVER_PORT)),
         YarnSchedulerBackend.ENDPOINT_NAME)
       // The client-mode AM doesn't listen for incoming connections, so report an invalid port.
-      registerAM(Utils.localHostName, -1, sparkConf,
+      registerAM(Utils.localHostNameForURI(), -1, sparkConf,
         sparkConf.getOption("spark.driver.appUIAddress"), appAttemptId)
       val encodedAppId = URLEncoder.encode(appAttemptId.getApplicationId.toString, "UTF-8")
       addAmIpFilter(Some(driverRef), s"/proxy/$encodedAppId")
@@ -322,8 +317,9 @@ private[spark] class ApplicationMaster(
           ApplicationMaster.EXIT_UNCAUGHT_EXCEPTION,
           "Uncaught exception: " + StringUtils.stringifyException(e))
         if (!unregistered) {
-          unregister(finalStatus, finalMsg)
+          // It's ok to clean staging dir first because unmanaged AM can't be retried.
           cleanupStagingDir(stagingDir)
+          unregister(finalStatus, finalMsg)
         }
     } finally {
       try {
@@ -343,8 +339,9 @@ private[spark] class ApplicationMaster(
       finish(FinalApplicationStatus.SUCCEEDED, ApplicationMaster.EXIT_SUCCESS)
     }
     if (!unregistered) {
-      unregister(finalStatus, finalMsg)
+      // It's ok to clean staging dir first because unmanaged AM can't be retried.
       cleanupStagingDir(stagingDir)
+      unregister(finalStatus, finalMsg)
     }
   }
 
@@ -482,7 +479,10 @@ private[spark] class ApplicationMaster(
     // that when the driver sends an initial executor request (e.g. after an AM restart),
     // the allocator is ready to service requests.
     rpcEnv.setupEndpoint("YarnAM", new AMEndpoint(rpcEnv, driverRef))
-
+    if (_sparkConf.get(SHUFFLE_SERVICE_ENABLED)) {
+      logInfo("Initializing service data for shuffle service using name '" +
+        s"${_sparkConf.get(SHUFFLE_SERVICE_NAME)}'")
+    }
     allocator.allocateResources()
     val ms = MetricsSystem.createMetricsSystem(MetricsSystemInstances.APPLICATION_MASTER, sparkConf)
     val prefix = _sparkConf.get(YARN_METRICS_NAMESPACE).getOrElse(appId)
@@ -537,7 +537,7 @@ private[spark] class ApplicationMaster(
   }
 
   private def runExecutorLauncher(): Unit = {
-    val hostname = Utils.localHostName
+    val hostname = Utils.localHostNameForURI()
     val amCores = sparkConf.get(AM_CORES)
     val rpcEnv = RpcEnv.create("sparkYarnAM", hostname, hostname, -1, sparkConf, securityMgr,
       amCores, true)
@@ -673,11 +673,15 @@ private[spark] class ApplicationMaster(
    * Clean up the staging directory.
    */
   private def cleanupStagingDir(stagingDirPath: Path): Unit = {
+    val stagingDirFs = stagingDirPath.getFileSystem(yarnConf)
+    cleanupStagingDir(stagingDirFs, stagingDirPath)
+  }
+
+  private def cleanupStagingDir(fs: FileSystem, stagingDirPath: Path): Unit = {
     try {
       val preserveFiles = sparkConf.get(PRESERVE_STAGING_FILES)
       if (!preserveFiles) {
         logInfo("Deleting staging directory " + stagingDirPath)
-        val fs = stagingDirPath.getFileSystem(yarnConf)
         fs.delete(stagingDirPath, true)
       }
     } catch {
@@ -745,7 +749,7 @@ private[spark] class ApplicationMaster(
                 logError(msg)
                 finish(FinalApplicationStatus.FAILED, exitCode, msg)
               case cause: Throwable =>
-                logError("User class threw exception: " + cause, cause)
+                logError("User class threw exception: ", cause)
                 finish(FinalApplicationStatus.FAILED,
                   ApplicationMaster.EXIT_EXCEPTION_USER_CLASS,
                   "User class threw exception: " + StringUtils.stringifyException(cause))
@@ -776,6 +780,11 @@ private[spark] class ApplicationMaster(
    */
   private class AMEndpoint(override val rpcEnv: RpcEnv, driver: RpcEndpointRef)
     extends RpcEndpoint with Logging {
+    @volatile private var shutdown = false
+    @volatile private var exitCode = 0
+
+    private val clientModeTreatDisconnectAsFailed =
+      sparkConf.get(AM_CLIENT_MODE_TREAT_DISCONNECT_AS_FAILED)
 
     override def onStart(): Unit = {
       driver.send(RegisterClusterManager(self))
@@ -793,6 +802,11 @@ private[spark] class ApplicationMaster(
     override def receive: PartialFunction[Any, Unit] = {
       case UpdateDelegationTokens(tokens) =>
         SparkHadoopUtil.get.addDelegationTokens(tokens, sparkConf)
+
+      case Shutdown(code) =>
+        exitCode = code
+        shutdown = true
+        allocator.setShutdown(true)
     }
 
     override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
@@ -835,8 +849,18 @@ private[spark] class ApplicationMaster(
       // In cluster mode or unmanaged am case, do not rely on the disassociated event to exit
       // This avoids potentially reporting incorrect exit codes if the driver fails
       if (!(isClusterMode || sparkConf.get(YARN_UNMANAGED_AM))) {
-        logInfo(s"Driver terminated or disconnected! Shutting down. $remoteAddress")
-        finish(FinalApplicationStatus.SUCCEEDED, ApplicationMaster.EXIT_SUCCESS)
+        if (shutdown || !clientModeTreatDisconnectAsFailed) {
+          if (exitCode == 0) {
+            logInfo(s"Driver terminated or disconnected! Shutting down. $remoteAddress")
+            finish(FinalApplicationStatus.SUCCEEDED, ApplicationMaster.EXIT_SUCCESS)
+          } else {
+            logError(s"Driver terminated with exit code ${exitCode}! Shutting down. $remoteAddress")
+            finish(FinalApplicationStatus.FAILED, exitCode)
+          }
+        } else {
+          logError(s"Application Master lost connection with driver! Shutting down. $remoteAddress")
+          finish(FinalApplicationStatus.FAILED, ApplicationMaster.EXIT_DISCONNECTED)
+        }
       }
     }
   }
@@ -846,14 +870,14 @@ private[spark] class ApplicationMaster(
 object ApplicationMaster extends Logging {
 
   // exit codes for different causes, no reason behind the values
-  private val EXIT_SUCCESS = 0
+  private val EXIT_SUCCESS = SparkExitCode.EXIT_SUCCESS
   private val EXIT_UNCAUGHT_EXCEPTION = 10
-  private val EXIT_MAX_EXECUTOR_FAILURES = 11
+  private val EXIT_MAX_EXECUTOR_FAILURES = SparkExitCode.EXCEED_MAX_EXECUTOR_FAILURES
   private val EXIT_REPORTER_FAILURE = 12
   private val EXIT_SC_NOT_INITED = 13
-  private val EXIT_SECURITY = 14
   private val EXIT_EXCEPTION_USER_CLASS = 15
   private val EXIT_EARLY = 16
+  private val EXIT_DISCONNECTED = 17
 
   private var master: ApplicationMaster = _
 

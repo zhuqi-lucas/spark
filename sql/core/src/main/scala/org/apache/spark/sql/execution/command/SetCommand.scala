@@ -21,6 +21,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.IgnoreCachedData
+import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.internal.StaticSQLConf.CATALOG_IMPLEMENTATION
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
@@ -38,10 +39,10 @@ case class SetCommand(kv: Option[(String, Option[String])])
   extends LeafRunnableCommand with Logging {
 
   private def keyValueOutput: Seq[Attribute] = {
-    val schema = StructType(
-      StructField("key", StringType, nullable = false) ::
-        StructField("value", StringType, nullable = false) :: Nil)
-    schema.toAttributes
+    val schema = StructType(Array(
+      StructField("key", StringType, nullable = false),
+        StructField("value", StringType, nullable = false)))
+    toAttributes(schema)
   }
 
   private val (_output, runFunc): (Seq[Attribute], SparkSession => Seq[Row]) = kv match {
@@ -125,12 +126,12 @@ case class SetCommand(kv: Option[(String, Option[String])])
               Option(version).getOrElse("<unknown>"))
         }
       }
-      val schema = StructType(
-        StructField("key", StringType, nullable = false) ::
-          StructField("value", StringType, nullable = false) ::
-          StructField("meaning", StringType, nullable = false) ::
-          StructField("Since version", StringType, nullable = false) :: Nil)
-      (schema.toAttributes, runFunc)
+      val schema = StructType(Array(
+        StructField("key", StringType, nullable = false),
+          StructField("value", StringType, nullable = false),
+          StructField("meaning", StringType, nullable = false),
+          StructField("Since version", StringType, nullable = false)))
+      (toAttributes(schema), runFunc)
 
     // Queries the deprecated "mapred.reduce.tasks" property.
     case Some((SQLConf.Deprecated.MAPRED_REDUCE_TASKS, None)) =>

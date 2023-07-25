@@ -16,6 +16,7 @@
 #
 
 import unittest
+from distutils.version import LooseVersion
 
 import pandas as pd
 
@@ -25,7 +26,7 @@ from pyspark.testing.pandasutils import PandasOnSparkTestCase
 from pyspark.testing.sqlutils import SQLTestUtils
 
 
-class OpsOnDiffFramesGroupByTest(PandasOnSparkTestCase, SQLTestUtils):
+class OpsOnDiffFramesGroupByTestsMixin:
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -36,6 +37,11 @@ class OpsOnDiffFramesGroupByTest(PandasOnSparkTestCase, SQLTestUtils):
         reset_option("compute.ops_on_diff_frames")
         super().tearDownClass()
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43460): Enable OpsOnDiffFramesGroupByTests.test_groupby_different_lengths "
+        "for pandas 2.0.0.",
+    )
     def test_groupby_different_lengths(self):
         pdfs1 = [
             pd.DataFrame({"c": [4, 2, 7, 3, None, 1, 1, 1, 2], "d": list("abcdefght")}),
@@ -54,9 +60,15 @@ class OpsOnDiffFramesGroupByTest(PandasOnSparkTestCase, SQLTestUtils):
 
             for as_index in [True, False]:
                 if as_index:
-                    sort = lambda df: df.sort_index()
+
+                    def sort(df):
+                        return df.sort_index()
+
                 else:
-                    sort = lambda df: df.sort_values("c").reset_index(drop=True)
+
+                    def sort(df):
+                        return df.sort_values("c").reset_index(drop=True)
+
                 self.assert_eq(
                     sort(psdf1.groupby(psdf2.a, as_index=as_index).sum()),
                     sort(pdf1.groupby(pdf2.a, as_index=as_index).sum()),
@@ -74,6 +86,11 @@ class OpsOnDiffFramesGroupByTest(PandasOnSparkTestCase, SQLTestUtils):
                     almost=as_index,
                 )
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43459): Enable OpsOnDiffFramesGroupByTests.test_groupby_multiindex_columns "
+        "for pandas 2.0.0.",
+    )
     def test_groupby_multiindex_columns(self):
         pdf1 = pd.DataFrame(
             {("y", "c"): [4, 2, 7, 3, None, 1, 1, 1, 2], ("z", "d"): list("abcdefght")}
@@ -112,9 +129,14 @@ class OpsOnDiffFramesGroupByTest(PandasOnSparkTestCase, SQLTestUtils):
 
         for as_index in [True, False]:
             if as_index:
-                sort = lambda df: df.sort_index()
+
+                def sort(df):
+                    return df.sort_index()
+
             else:
-                sort = lambda df: df.sort_values(list(df.columns)).reset_index(drop=True)
+
+                def sort(df):
+                    return df.sort_values(list(df.columns)).reset_index(drop=True)
 
             with self.subTest(as_index=as_index):
                 self.assert_eq(
@@ -164,9 +186,14 @@ class OpsOnDiffFramesGroupByTest(PandasOnSparkTestCase, SQLTestUtils):
 
         for as_index in [True, False]:
             if as_index:
-                sort = lambda df: df.sort_index()
+
+                def sort(df):
+                    return df.sort_index()
+
             else:
-                sort = lambda df: df.sort_values(list(df.columns)).reset_index(drop=True)
+
+                def sort(df):
+                    return df.sort_values(list(df.columns)).reset_index(drop=True)
 
             with self.subTest(as_index=as_index):
                 self.assert_eq(
@@ -505,7 +532,7 @@ class OpsOnDiffFramesGroupByTest(PandasOnSparkTestCase, SQLTestUtils):
         self.assert_eq(psdf.groupby(kkey).diff().sum(), pdf.groupby(pkey).diff().sum().astype(int))
         self.assert_eq(psdf.groupby(kkey)["a"].diff().sum(), pdf.groupby(pkey)["a"].diff().sum())
 
-    def test_rank(self):
+    def test_fillna(self):
         pdf = pd.DataFrame(
             {
                 "a": [1, 2, 3, 4, 5, 6] * 3,
@@ -531,7 +558,6 @@ class OpsOnDiffFramesGroupByTest(PandasOnSparkTestCase, SQLTestUtils):
         self.assert_eq(psdf.groupby(kkey).rank().sum(), pdf.groupby(pkey).rank().sum())
         self.assert_eq(psdf.groupby(kkey)["a"].rank().sum(), pdf.groupby(pkey)["a"].rank().sum())
 
-    @unittest.skipIf(pd.__version__ < "0.24.0", "not supported before pandas 0.24.0")
     def test_shift(self):
         pdf = pd.DataFrame(
             {
@@ -611,11 +637,17 @@ class OpsOnDiffFramesGroupByTest(PandasOnSparkTestCase, SQLTestUtils):
         )
 
 
+class OpsOnDiffFramesGroupByTests(
+    OpsOnDiffFramesGroupByTestsMixin, PandasOnSparkTestCase, SQLTestUtils
+):
+    pass
+
+
 if __name__ == "__main__":
     from pyspark.pandas.tests.test_ops_on_diff_frames_groupby import *  # noqa: F401
 
     try:
-        import xmlrunner  # type: ignore[import]
+        import xmlrunner
 
         testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
     except ImportError:

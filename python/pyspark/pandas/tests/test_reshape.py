@@ -24,10 +24,11 @@ import pandas as pd
 
 from pyspark import pandas as ps
 from pyspark.pandas.utils import name_like_string
+from pyspark.errors import AnalysisException
 from pyspark.testing.pandasutils import PandasOnSparkTestCase
 
 
-class ReshapeTest(PandasOnSparkTestCase):
+class ReshapeTestsMixin:
     def test_get_dummies(self):
         for pdf_or_ps in [
             pd.Series([1, 1, 1, 2, 2, 1, 3, 4]),
@@ -52,6 +53,10 @@ class ReshapeTest(PandasOnSparkTestCase):
             NotImplementedError, "get_dummies currently does not support sparse"
         ):
             ps.get_dummies(psser, sparse=True)
+        with self.assertRaisesRegex(NotImplementedError, "get_dummies currently only accept"):
+            ps.get_dummies(ps.Series([b"1"]))
+        with self.assertRaisesRegex(NotImplementedError, "get_dummies currently only accept"):
+            ps.get_dummies(ps.Series([None]))
 
     def test_get_dummies_object(self):
         pdf = pd.DataFrame(
@@ -212,11 +217,8 @@ class ReshapeTest(PandasOnSparkTestCase):
         )
         psdf = ps.from_pandas(pdf)
 
-        if LooseVersion("0.23.0") <= LooseVersion(pd.__version__):
-            exp = pd.get_dummies(pdf, dtype="float64")
-        else:
-            exp = pd.get_dummies(pdf)
-            exp = exp.astype({"A_a": "float64", "A_b": "float64"})
+        exp = pd.get_dummies(pdf)
+        exp = exp.astype({"A_a": "float64", "A_b": "float64"})
         res = ps.get_dummies(psdf, dtype="float64")
         self.assert_eq(res, exp)
 
@@ -283,13 +285,209 @@ class ReshapeTest(PandasOnSparkTestCase):
             pd.get_dummies(pdf, columns=("x", 1), dtype=np.int8).rename(columns=name_like_string),
         )
 
+    def test_merge_asof(self):
+        pdf_left = pd.DataFrame(
+            {"a": [1, 5, 10], "b": ["x", "y", "z"], "left_val": ["a", "b", "c"]}, index=[10, 20, 30]
+        )
+        pdf_right = pd.DataFrame(
+            {"a": [1, 2, 3, 6, 7], "b": ["v", "w", "x", "y", "z"], "right_val": [1, 2, 3, 6, 7]},
+            index=[100, 101, 102, 103, 104],
+        )
+        psdf_left = ps.from_pandas(pdf_left)
+        psdf_right = ps.from_pandas(pdf_right)
+
+        self.assert_eq(
+            pd.merge_asof(pdf_left, pdf_right, on="a").sort_values("a").reset_index(drop=True),
+            ps.merge_asof(psdf_left, psdf_right, on="a").sort_values("a").reset_index(drop=True),
+        )
+        self.assert_eq(
+            (
+                pd.merge_asof(pdf_left, pdf_right, left_on="a", right_on="a")
+                .sort_values("a")
+                .reset_index(drop=True)
+            ),
+            (
+                ps.merge_asof(psdf_left, psdf_right, left_on="a", right_on="a")
+                .sort_values("a")
+                .reset_index(drop=True)
+            ),
+        )
+        if LooseVersion(pd.__version__) >= LooseVersion("1.3"):
+            self.assert_eq(
+                pd.merge_asof(
+                    pdf_left.set_index("a"), pdf_right, left_index=True, right_on="a"
+                ).sort_index(),
+                ps.merge_asof(
+                    psdf_left.set_index("a"), psdf_right, left_index=True, right_on="a"
+                ).sort_index(),
+            )
+        else:
+            expected = pd.DataFrame(
+                {
+                    "b_x": ["x", "y", "z"],
+                    "left_val": ["a", "b", "c"],
+                    "a": [1, 3, 7],
+                    "b_y": ["v", "x", "z"],
+                    "right_val": [1, 3, 7],
+                },
+                index=pd.Index([1, 5, 10], name="a"),
+            )
+            self.assert_eq(
+                expected,
+                ps.merge_asof(
+                    psdf_left.set_index("a"), psdf_right, left_index=True, right_on="a"
+                ).sort_index(),
+            )
+        self.assert_eq(
+            pd.merge_asof(
+                pdf_left, pdf_right.set_index("a"), left_on="a", right_index=True
+            ).sort_index(),
+            ps.merge_asof(
+                psdf_left, psdf_right.set_index("a"), left_on="a", right_index=True
+            ).sort_index(),
+        )
+        self.assert_eq(
+            pd.merge_asof(
+                pdf_left.set_index("a"), pdf_right.set_index("a"), left_index=True, right_index=True
+            ).sort_index(),
+            ps.merge_asof(
+                psdf_left.set_index("a"),
+                psdf_right.set_index("a"),
+                left_index=True,
+                right_index=True,
+            ).sort_index(),
+        )
+        self.assert_eq(
+            (
+                pd.merge_asof(pdf_left, pdf_right, on="a", by="b")
+                .sort_values("a")
+                .reset_index(drop=True)
+            ),
+            (
+                ps.merge_asof(psdf_left, psdf_right, on="a", by="b")
+                .sort_values("a")
+                .reset_index(drop=True)
+            ),
+        )
+        self.assert_eq(
+            (
+                pd.merge_asof(pdf_left, pdf_right, on="a", tolerance=1)
+                .sort_values("a")
+                .reset_index(drop=True)
+            ),
+            (
+                ps.merge_asof(psdf_left, psdf_right, on="a", tolerance=1)
+                .sort_values("a")
+                .reset_index(drop=True)
+            ),
+        )
+        self.assert_eq(
+            (
+                pd.merge_asof(pdf_left, pdf_right, on="a", allow_exact_matches=False)
+                .sort_values("a")
+                .reset_index(drop=True)
+            ),
+            (
+                ps.merge_asof(psdf_left, psdf_right, on="a", allow_exact_matches=False)
+                .sort_values("a")
+                .reset_index(drop=True)
+            ),
+        )
+        self.assert_eq(
+            (
+                pd.merge_asof(pdf_left, pdf_right, on="a", direction="forward")
+                .sort_values("a")
+                .reset_index(drop=True)
+            ),
+            (
+                ps.merge_asof(psdf_left, psdf_right, on="a", direction="forward")
+                .sort_values("a")
+                .reset_index(drop=True)
+            ),
+        )
+        self.assert_eq(
+            (
+                pd.merge_asof(pdf_left, pdf_right, on="a", direction="nearest")
+                .sort_values("a")
+                .reset_index(drop=True)
+            ),
+            (
+                ps.merge_asof(psdf_left, psdf_right, on="a", direction="nearest")
+                .sort_values("a")
+                .reset_index(drop=True)
+            ),
+        )
+        # Including Series
+        self.assert_eq(
+            pd.merge_asof(pdf_left["a"], pdf_right, on="a").sort_values("a").reset_index(drop=True),
+            ps.merge_asof(psdf_left["a"], psdf_right, on="a")
+            .sort_values("a")
+            .reset_index(drop=True),
+        )
+        self.assert_eq(
+            pd.merge_asof(pdf_left, pdf_right["a"], on="a").sort_values("a").reset_index(drop=True),
+            ps.merge_asof(psdf_left, psdf_right["a"], on="a")
+            .sort_values("a")
+            .reset_index(drop=True),
+        )
+        self.assert_eq(
+            pd.merge_asof(pdf_left["a"], pdf_right["a"], on="a")
+            .sort_values("a")
+            .reset_index(drop=True),
+            ps.merge_asof(psdf_left["a"], psdf_right["a"], on="a")
+            .sort_values("a")
+            .reset_index(drop=True),
+        )
+
+        self.assertRaises(
+            AnalysisException, lambda: ps.merge_asof(psdf_left, psdf_right, on="a", tolerance=-1)
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            'Can only pass argument "on" OR "left_on" and "right_on", not a combination of both.',
+        ):
+            ps.merge_asof(psdf_left, psdf_right, on="a", left_on="a")
+        psdf_multi_index = ps.DataFrame(
+            {"a": [1, 2, 3, 6, 7], "b": ["v", "w", "x", "y", "z"], "right_val": [1, 2, 3, 6, 7]},
+            index=pd.MultiIndex.from_tuples([(1, 2), (3, 4), (5, 6), (7, 8), (9, 10)]),
+        )
+        with self.assertRaisesRegex(ValueError, "right can only have one index"):
+            ps.merge_asof(psdf_left, psdf_multi_index, right_index=True)
+        with self.assertRaisesRegex(ValueError, "left can only have one index"):
+            ps.merge_asof(psdf_multi_index, psdf_right, left_index=True)
+        with self.assertRaisesRegex(ValueError, "Must pass right_on or right_index=True"):
+            ps.merge_asof(psdf_left, psdf_right, left_index=True)
+        with self.assertRaisesRegex(ValueError, "Must pass left_on or left_index=True"):
+            ps.merge_asof(psdf_left, psdf_right, right_index=True)
+        with self.assertRaisesRegex(ValueError, "can only asof on a key for left"):
+            ps.merge_asof(psdf_left, psdf_right, right_on="a", left_on=["a", "b"])
+        with self.assertRaisesRegex(ValueError, "can only asof on a key for right"):
+            ps.merge_asof(psdf_left, psdf_right, right_on=["a", "b"], left_on="a")
+        with self.assertRaisesRegex(
+            ValueError, 'Can only pass argument "by" OR "left_by" and "right_by".'
+        ):
+            ps.merge_asof(psdf_left, psdf_right, on="a", by="b", left_by="a")
+        with self.assertRaisesRegex(ValueError, "missing right_by"):
+            ps.merge_asof(psdf_left, psdf_right, on="a", left_by="b")
+        with self.assertRaisesRegex(ValueError, "missing left_by"):
+            ps.merge_asof(psdf_left, psdf_right, on="a", right_by="b")
+        with self.assertRaisesRegex(ValueError, "left_by and right_by must be same length"):
+            ps.merge_asof(psdf_left, psdf_right, on="a", left_by="b", right_by=["a", "b"])
+        psdf_right.columns = ["A", "B", "C"]
+        with self.assertRaisesRegex(ValueError, "No common columns to perform merge on."):
+            ps.merge_asof(psdf_left, psdf_right)
+
+
+class ReshapeTests(ReshapeTestsMixin, PandasOnSparkTestCase):
+    pass
+
 
 if __name__ == "__main__":
     import unittest
     from pyspark.pandas.tests.test_reshape import *  # noqa: F401
 
     try:
-        import xmlrunner  # type: ignore[import]
+        import xmlrunner
 
         testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
     except ImportError:

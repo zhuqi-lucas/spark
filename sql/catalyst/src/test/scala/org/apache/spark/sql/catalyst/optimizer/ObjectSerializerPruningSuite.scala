@@ -28,6 +28,7 @@ import org.apache.spark.sql.catalyst.expressions.objects.Invoke
 import org.apache.spark.sql.catalyst.plans.PlanTest
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.RuleExecutor
+import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 
@@ -73,10 +74,10 @@ class ObjectSerializerPruningSuite extends PlanTest {
   }
 
   test("SPARK-26619: Prune the unused serializers from SerializeFromObject") {
-    val testRelation = LocalRelation('_1.int, '_2.int)
+    val testRelation = LocalRelation($"_1".int, $"_2".int)
     val serializerObject = CatalystSerde.serialize[(Int, Int)](
       CatalystSerde.deserialize[(Int, Int)](testRelation))
-    val query = serializerObject.select('_1)
+    val query = serializerObject.select($"_1")
     val optimized = Optimize.execute(query.analyze)
     val expected = serializerObject.copy(serializer = Seq(serializerObject.serializer.head)).analyze
     comparePlans(optimized, expected)
@@ -84,7 +85,8 @@ class ObjectSerializerPruningSuite extends PlanTest {
 
   test("Prune nested serializers") {
     withSQLConf(SQLConf.SERIALIZER_NESTED_SCHEMA_PRUNING_ENABLED.key -> "true") {
-      val testRelation = LocalRelation('_1.struct(StructType.fromDDL("_1 int, _2 string")), '_2.int)
+      val testRelation = LocalRelation(
+        $"_1".struct(StructType.fromDDL("_1 int, _2 string")), $"_2".int)
       val serializerObject = CatalystSerde.serialize[((Int, String), Int)](
         CatalystSerde.deserialize[((Int, String), Int)](testRelation))
       val query = serializerObject.select($"_1._1")
@@ -95,7 +97,8 @@ class ObjectSerializerPruningSuite extends PlanTest {
           CreateNamedStruct(children.take(2))
       }.transformUp {
         // Aligns null literal in `If` expression to make it resolvable.
-        case i @ If(_: IsNull, Literal(null, dt), ser) if !dt.sameType(ser.dataType) =>
+        case i @ If(_: IsNull, Literal(null, dt), ser)
+          if !DataTypeUtils.sameType(dt, ser.dataType) =>
           i.copy(trueValue = Literal(null, ser.dataType))
       }.asInstanceOf[NamedExpression]
 
@@ -111,7 +114,7 @@ class ObjectSerializerPruningSuite extends PlanTest {
 
   test("SPARK-32652: Prune nested serializers: RowEncoder") {
     withSQLConf(SQLConf.SERIALIZER_NESTED_SCHEMA_PRUNING_ENABLED.key -> "true") {
-      val testRelation = LocalRelation('i.struct(StructType.fromDDL("a int, b string")), 'j.int)
+      val testRelation = LocalRelation($"i".struct(StructType.fromDDL("a int, b string")), $"j".int)
       val rowEncoder = RowEncoder(new StructType()
         .add("i", new StructType().add("a", "int").add("b", "string"))
         .add("j", "int"))
@@ -125,7 +128,7 @@ class ObjectSerializerPruningSuite extends PlanTest {
       }.transformUp {
         // Aligns null literal in `If` expression to make it resolvable.
         case i @ If(invoke: Invoke, Literal(null, dt), ser) if invoke.functionName == "isNullAt" &&
-            !dt.sameType(ser.dataType) =>
+            !DataTypeUtils.sameType(dt, ser.dataType) =>
           i.copy(trueValue = Literal(null, ser.dataType))
       }.asInstanceOf[NamedExpression]
 

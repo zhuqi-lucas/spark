@@ -17,8 +17,6 @@
 
 package org.apache.spark.sql.execution.arrow
 
-import org.apache.arrow.vector.IntervalDayVector
-
 import org.apache.spark.SparkFunSuite
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.util._
@@ -29,7 +27,11 @@ import org.apache.spark.unsafe.types.UTF8String
 class ArrowWriterSuite extends SparkFunSuite {
 
   test("simple") {
-    def check(dt: DataType, data: Seq[Any], timeZoneId: String = null): Unit = {
+    def check(
+        dt: DataType,
+        data: Seq[Any],
+        timeZoneId: String = null,
+        largeVarTypes: Boolean = false): Unit = {
       val datatype = dt match {
         case _: DayTimeIntervalType => DayTimeIntervalType()
         case _: YearMonthIntervalType => YearMonthIntervalType()
@@ -79,7 +81,9 @@ class ArrowWriterSuite extends SparkFunSuite {
     check(DoubleType, Seq(1.0d, 2.0d, null, 4.0d))
     check(DecimalType.SYSTEM_DEFAULT, Seq(Decimal(1), Decimal(2), null, Decimal(4)))
     check(StringType, Seq("a", "b", null, "d").map(UTF8String.fromString))
+    check(StringType, Seq("a", "b", null, "d").map(UTF8String.fromString), null, true)
     check(BinaryType, Seq("a".getBytes(), "b".getBytes(), null, "d".getBytes()))
+    check(BinaryType, Seq("a".getBytes(), "b".getBytes(), null, "d".getBytes()), null, true)
     check(DateType, Seq(0, 1, 2, null, 4))
     check(TimestampType, Seq(0L, 3.6e9.toLong, null, 8.64e10.toLong), "America/Los_Angeles")
     check(TimestampNTZType, Seq(0L, 3.6e9.toLong, null, 8.64e10.toLong))
@@ -88,30 +92,6 @@ class ArrowWriterSuite extends SparkFunSuite {
       .foreach(check(_, Seq(null, 0, 1, -1, Int.MaxValue, Int.MinValue)))
     DataTypeTestUtils.dayTimeIntervalTypes.foreach(check(_,
       Seq(null, 0L, 1000L, -1000L, (Long.MaxValue - 807L), (Long.MinValue + 808L))))
-  }
-
-  test("long overflow for DayTimeIntervalType")
-  {
-    val schema = new StructType().add("value", DayTimeIntervalType(), nullable = true)
-    val writer = ArrowWriter.create(schema, null)
-    val reader = new ArrowColumnVector(writer.root.getFieldVectors().get(0))
-    val valueVector = writer.root.getFieldVectors().get(0).asInstanceOf[IntervalDayVector]
-
-    valueVector.set(0, 106751992, 0)
-    valueVector.set(1, 106751991, Int.MaxValue)
-
-    // first long overflow for test Math.multiplyExact()
-    val msg = intercept[java.lang.ArithmeticException] {
-      reader.getLong(0)
-    }.getMessage
-    assert(msg.equals("long overflow"))
-
-    // second long overflow for test Math.addExact()
-    val msg1 = intercept[java.lang.ArithmeticException] {
-      reader.getLong(1)
-    }.getMessage
-    assert(msg1.equals("long overflow"))
-    writer.root.close()
   }
 
   test("get multiple") {

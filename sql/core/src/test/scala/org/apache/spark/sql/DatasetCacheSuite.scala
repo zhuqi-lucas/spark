@@ -25,8 +25,9 @@ import org.apache.spark.sql.execution.columnar.{InMemoryRelation, InMemoryTableS
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.test.SharedSparkSession
 import org.apache.spark.storage.StorageLevel
+import org.apache.spark.tags.SlowSQLTest
 
-
+@SlowSQLTest
 class DatasetCacheSuite extends QueryTest
   with SharedSparkSession
   with TimeLimits
@@ -250,7 +251,7 @@ class DatasetCacheSuite extends QueryTest
       case i: InMemoryRelation => i.cacheBuilder.cachedPlan
     }
     assert(df2LimitInnerPlan.isDefined &&
-      df2LimitInnerPlan.get.find(_.isInstanceOf[InMemoryTableScanExec]).isEmpty)
+      !df2LimitInnerPlan.get.exists(_.isInstanceOf[InMemoryTableScanExec]))
   }
 
   test("SPARK-27739 Save stats from optimized plan") {

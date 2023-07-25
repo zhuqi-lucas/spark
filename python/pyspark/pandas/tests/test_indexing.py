@@ -24,10 +24,10 @@ import pandas as pd
 
 from pyspark import pandas as ps
 from pyspark.pandas.exceptions import SparkPandasIndexingError
-from pyspark.testing.pandasutils import ComparisonTestBase, PandasOnSparkTestCase, compare_both
+from pyspark.testing.pandasutils import ComparisonTestBase, compare_both
 
 
-class BasicIndexingTest(ComparisonTestBase):
+class BasicIndexingTestsMixin:
     @property
     def pdf(self):
         return pd.DataFrame(
@@ -138,10 +138,10 @@ class BasicIndexingTest(ComparisonTestBase):
         pdf = self.pdf
 
         df1 = ps.from_pandas(pdf.set_index("month"))
-        self.assertPandasEqual(df1.to_pandas(), pdf.set_index("month"))
+        self.assertPandasEqual(df1._to_pandas(), pdf.set_index("month"))
 
         df2 = ps.from_pandas(pdf.set_index(["year", "month"]))
-        self.assertPandasEqual(df2.to_pandas(), pdf.set_index(["year", "month"]))
+        self.assertPandasEqual(df2._to_pandas(), pdf.set_index(["year", "month"]))
 
     def test_limitations(self):
         df = self.psdf.set_index("month")
@@ -153,17 +153,13 @@ class BasicIndexingTest(ComparisonTestBase):
         )
 
 
-class IndexingTest(PandasOnSparkTestCase):
+class IndexingTest(ComparisonTestBase):
     @property
     def pdf(self):
         return pd.DataFrame(
             {"a": [1, 2, 3, 4, 5, 6, 7, 8, 9], "b": [4, 5, 6, 3, 2, 1, 0, 0, 0]},
             index=[0, 1, 3, 5, 6, 8, 9, 9, 9],
         )
-
-    @property
-    def psdf(self):
-        return ps.from_pandas(self.pdf)
 
     @property
     def pdf2(self):
@@ -416,6 +412,15 @@ class IndexingTest(PandasOnSparkTestCase):
 
         self.assertRaises(KeyError, lambda: psdf.loc[0:30])
         self.assertRaises(KeyError, lambda: psdf.loc[10:100])
+
+    def test_loc_getitem_boolean_series(self):
+        pdf = pd.DataFrame(
+            {"A": [0, 1, 2, 3, 4], "B": [100, 200, 300, 400, 500]}, index=[20, 10, 30, 0, 50]
+        )
+        psdf = ps.from_pandas(pdf)
+        self.assert_eq(pdf.A.loc[pdf.B > 200], psdf.A.loc[psdf.B > 200])
+        self.assert_eq(pdf.B.loc[pdf.B > 200], psdf.B.loc[psdf.B > 200])
+        self.assert_eq(pdf.loc[pdf.B > 200], psdf.loc[psdf.B > 200])
 
     def test_loc_non_informative_index(self):
         pdf = pd.DataFrame({"x": [1, 2, 3, 4]}, index=[10, 20, 30, 40])
@@ -1160,12 +1165,6 @@ class IndexingTest(PandasOnSparkTestCase):
         psser.loc["y"] = psser * 10
         self.assert_eq(psser, pser)
 
-        if LooseVersion(pd.__version__) < LooseVersion("1.0"):
-            # TODO: seems like a pandas' bug in pandas>=1.0.0?
-            pser.loc[("x", "viper"):"y"] = pser * 20
-            psser.loc[("x", "viper"):"y"] = psser * 20
-            self.assert_eq(psser, pser)
-
     def test_series_iloc_setitem(self):
         pdf = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]}, index=["cobra", "viper", "sidewinder"])
         psdf = ps.from_pandas(pdf)
@@ -1324,11 +1323,15 @@ class IndexingTest(PandasOnSparkTestCase):
             psdf.iloc[[1, 1]]
 
 
+class BasicIndexingTests(BasicIndexingTestsMixin, ComparisonTestBase):
+    pass
+
+
 if __name__ == "__main__":
     from pyspark.pandas.tests.test_indexing import *  # noqa: F401
 
     try:
-        import xmlrunner  # type: ignore[import]
+        import xmlrunner
 
         testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
     except ImportError:

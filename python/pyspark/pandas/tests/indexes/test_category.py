@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import unittest
 from distutils.version import LooseVersion
 
 import pandas as pd
@@ -24,7 +25,7 @@ import pyspark.pandas as ps
 from pyspark.testing.pandasutils import PandasOnSparkTestCase, TestUtils
 
 
-class CategoricalIndexTest(PandasOnSparkTestCase, TestUtils):
+class CategoricalIndexTestsMixin:
     def test_categorical_index(self):
         pidx = pd.CategoricalIndex([1, 2, 3])
         psidx = ps.CategoricalIndex([1, 2, 3])
@@ -67,6 +68,17 @@ class CategoricalIndexTest(PandasOnSparkTestCase, TestUtils):
         self.assert_eq(psidx.codes, pd.Index(pidx.codes))
         self.assert_eq(psidx.ordered, pidx.ordered)
 
+        with self.assertRaisesRegexp(TypeError, "Index.name must be a hashable type"):
+            ps.CategoricalIndex([1, 2, 3], name=[(1, 2, 3)])
+        with self.assertRaisesRegexp(
+            TypeError, "Cannot perform 'all' with this index type: CategoricalIndex"
+        ):
+            ps.CategoricalIndex([1, 2, 3]).all()
+
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43568): Enable CategoricalIndexTests.test_categories_setter for pandas 2.0.0.",
+    )
     def test_categories_setter(self):
         pdf = pd.DataFrame(
             {
@@ -82,7 +94,11 @@ class CategoricalIndexTest(PandasOnSparkTestCase, TestUtils):
 
         pidx.categories = ["z", "y", "x"]
         psidx.categories = ["z", "y", "x"]
-        if LooseVersion(pd.__version__) >= LooseVersion("1.0.5"):
+        # Pandas deprecated all the in-place category-setting behaviors, dtypes also not be
+        # refreshed in categories.setter since Pandas 1.4+, we should also consider to clean up
+        # this test when in-place category-setting removed:
+        # https://github.com/pandas-dev/pandas/issues/46820
+        if LooseVersion("1.4") >= LooseVersion(pd.__version__) >= LooseVersion("1.1"):
             self.assert_eq(pidx, psidx)
             self.assert_eq(pdf, psdf)
         else:
@@ -106,6 +122,10 @@ class CategoricalIndexTest(PandasOnSparkTestCase, TestUtils):
         self.assertRaises(ValueError, lambda: psidx.add_categories(3))
         self.assertRaises(ValueError, lambda: psidx.add_categories([4, 4]))
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43633): Enable CategoricalIndexTests.test_remove_categories for pandas 2.0.0.",
+    )
     def test_remove_categories(self):
         pidx = pd.CategoricalIndex([1, 2, 3], categories=[3, 2, 1])
         psidx = ps.from_pandas(pidx)
@@ -118,7 +138,7 @@ class CategoricalIndexTest(PandasOnSparkTestCase, TestUtils):
         self.assert_eq(pidx.remove_categories(None), psidx.remove_categories(None))
         self.assert_eq(pidx.remove_categories([None]), psidx.remove_categories([None]))
 
-        self.assertRaises(ValueError, lambda: pidx.remove_categories(4, inplace=True))
+        self.assertRaises(ValueError, lambda: psidx.remove_categories(4, inplace=True))
         self.assertRaises(ValueError, lambda: psidx.remove_categories(4))
         self.assertRaises(ValueError, lambda: psidx.remove_categories([4, None]))
 
@@ -145,7 +165,7 @@ class CategoricalIndexTest(PandasOnSparkTestCase, TestUtils):
             psidx.reorder_categories([3, 2, 1], ordered=True),
         )
 
-        self.assertRaises(ValueError, lambda: pidx.reorder_categories([1, 2, 3], inplace=True))
+        self.assertRaises(ValueError, lambda: psidx.reorder_categories([1, 2, 3], inplace=True))
         self.assertRaises(ValueError, lambda: psidx.reorder_categories([1, 2]))
         self.assertRaises(ValueError, lambda: psidx.reorder_categories([1, 2, 4]))
         self.assertRaises(ValueError, lambda: psidx.reorder_categories([1, 2, 2]))
@@ -190,6 +210,10 @@ class CategoricalIndexTest(PandasOnSparkTestCase, TestUtils):
 
         self.assert_eq(pscidx.astype(str), pcidx.astype(str))
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43567): Enable CategoricalIndexTests.test_factorize for pandas 2.0.0.",
+    )
     def test_factorize(self):
         pidx = pd.CategoricalIndex([1, 2, 3, None])
         psidx = ps.from_pandas(pidx)
@@ -215,9 +239,18 @@ class CategoricalIndexTest(PandasOnSparkTestCase, TestUtils):
         psidx3 = ps.from_pandas(pidx3)
 
         self.assert_eq(psidx1.append(psidx2), pidx1.append(pidx2))
-        self.assert_eq(
-            psidx1.append(psidx3.astype("category")), pidx1.append(pidx3.astype("category"))
-        )
+        if LooseVersion(pd.__version__) >= LooseVersion("1.5.0"):
+            self.assert_eq(
+                psidx1.append(psidx3.astype("category")), pidx1.append(pidx3.astype("category"))
+            )
+        else:
+            expected_result = ps.CategoricalIndex(
+                ["x", "y", "z", "y", "x", "w", "z"],
+                categories=["z", "y", "x", "w"],
+                ordered=False,
+                dtype="category",
+            )
+            self.assert_eq(psidx1.append(psidx3.astype("category")), expected_result)
 
         # TODO: append non-categorical or categorical with a different category
         self.assertRaises(NotImplementedError, lambda: psidx1.append(psidx3))
@@ -310,6 +343,10 @@ class CategoricalIndexTest(PandasOnSparkTestCase, TestUtils):
         self.assertRaises(
             TypeError,
             lambda: psidx.rename_categories("x"),
+        )
+        self.assertRaises(
+            ValueError,
+            lambda: psidx.rename_categories({"b": "B", "c": "C"}, inplace=True),
         )
 
     def test_set_categories(self):
@@ -430,12 +467,16 @@ class CategoricalIndexTest(PandasOnSparkTestCase, TestUtils):
             )
 
 
+class CategoricalIndexTests(CategoricalIndexTestsMixin, PandasOnSparkTestCase, TestUtils):
+    pass
+
+
 if __name__ == "__main__":
     import unittest
     from pyspark.pandas.tests.indexes.test_category import *  # noqa: F401
 
     try:
-        import xmlrunner  # type: ignore[import]
+        import xmlrunner
 
         testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
     except ImportError:

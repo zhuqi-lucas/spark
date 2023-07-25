@@ -32,7 +32,9 @@ import org.apache.spark.sql.execution.adaptive.DisableAdaptiveExecution
 import org.apache.spark.sql.execution.debug.codegenStringSeq
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.test.SQLTestUtils
+import org.apache.spark.tags.ExtendedSQLTest
 
+@ExtendedSQLTest
 class ExecutorSideSQLConfSuite extends SparkFunSuite with SQLTestUtils {
   import testImplicits._
 
@@ -81,7 +83,7 @@ class ExecutorSideSQLConfSuite extends SparkFunSuite with SQLTestUtils {
     withSQLConf(SQLConf.CASE_SENSITIVE.key -> "true") {
       withTempPath { path =>
         val pathString = path.getCanonicalPath
-        spark.range(10).select('id.as("ID")).write.json(pathString)
+        spark.range(10).select($"id".as("ID")).write.json(pathString)
         spark.range(10).write.mode("append").json(pathString)
         assert(spark.read.json(pathString).columns.toSet == Set("id", "ID"))
       }
@@ -139,9 +141,10 @@ class ExecutorSideSQLConfSuite extends SparkFunSuite with SQLTestUtils {
           Seq(true)
             .toDF()
             .mapPartitions { _ =>
-              TaskContext.get.getLocalProperty(confKey) == confValue match {
-                case true => Iterator(true)
-                case false => Iterator.empty
+              if (TaskContext.get.getLocalProperty(confKey) == confValue) {
+                Iterator(true)
+              } else {
+                Iterator.empty
               }
             }
         }

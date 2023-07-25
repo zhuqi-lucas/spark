@@ -229,7 +229,7 @@ private[sql] trait SQLTestUtilsBase
   protected def sparkContext = spark.sparkContext
 
   // Shorthand for running a query using our SQLContext
-  protected lazy val sql = spark.sql _
+  protected lazy val sql: String => DataFrame = spark.sql _
 
   /**
    * A helper object for importing SQL implicits.
@@ -389,6 +389,17 @@ private[sql] trait SQLTestUtilsBase
       namespaces.foreach { name =>
         spark.sql(s"DROP NAMESPACE IF EXISTS $name CASCADE")
       }
+    }
+  }
+
+  /**
+   * Restores the current catalog/database after calling `f`.
+   */
+  protected def withCurrentCatalogAndNamespace(f: => Unit): Unit = {
+    val curCatalog = sql("select current_catalog()").head().getString(0)
+    val curDatabase = sql("select current_database()").head().getString(0)
+    Utils.tryWithSafeFinally(f) {
+      spark.sql(s"USE $curCatalog.$curDatabase")
     }
   }
 

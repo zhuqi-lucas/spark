@@ -35,7 +35,7 @@ from pyspark.pandas.typedef.typehints import (
 )
 
 
-class OpsOnDiffFramesEnabledTest(PandasOnSparkTestCase, SQLTestUtils):
+class OpsOnDiffFramesEnabledTestsMixin:
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -359,9 +359,7 @@ class OpsOnDiffFramesEnabledTest(PandasOnSparkTestCase, SQLTestUtils):
             )
 
         # DataFrame
-        if check_extension and (
-            LooseVersion("1.0") <= LooseVersion(pd.__version__) < LooseVersion("1.1")
-        ):
+        if check_extension and LooseVersion(pd.__version__) < LooseVersion("1.1"):
             self.assert_eq(
                 (psdf1 + psdf2 - psdf3).sort_index(), (pdf1 + pdf2 - pdf3).sort_index(), almost=True
             )
@@ -392,9 +390,7 @@ class OpsOnDiffFramesEnabledTest(PandasOnSparkTestCase, SQLTestUtils):
         )
 
         # DataFrame
-        if check_extension and (
-            LooseVersion("1.0") <= LooseVersion(pd.__version__) < LooseVersion("1.1")
-        ):
+        if check_extension and LooseVersion(pd.__version__) < LooseVersion("1.1"):
             self.assert_eq(
                 (psdf1 + psdf2 - psdf3).sort_index(), (pdf1 + pdf2 - pdf3).sort_index(), almost=True
             )
@@ -420,26 +416,9 @@ class OpsOnDiffFramesEnabledTest(PandasOnSparkTestCase, SQLTestUtils):
         assert_eq((psser1 * psser2 * psser3).sort_index(), (pser1 * pser2 * pser3).sort_index())
 
         if check_extension and not extension_float_dtypes_available:
-            if LooseVersion(pd.__version__) >= LooseVersion("1.0"):
-                self.assert_eq(
-                    (psser1 - psser2 / psser3).sort_index(), (pser1 - pser2 / pser3).sort_index()
-                )
-            else:
-                expected = pd.Series(
-                    [249.0, np.nan, 0.0, 0.88, np.nan, np.nan, np.nan, np.nan, np.nan, -np.inf]
-                    + [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan],
-                    index=pd.MultiIndex(
-                        [
-                            ["cow", "falcon", "koala", "koalas", "lama"],
-                            ["length", "power", "speed", "weight"],
-                        ],
-                        [
-                            [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 3, 3, 3, 4, 4, 4],
-                            [0, 1, 2, 2, 3, 0, 0, 1, 2, 3, 0, 0, 3, 3, 0, 2, 3],
-                        ],
-                    ),
-                )
-                self.assert_eq((psser1 - psser2 / psser3).sort_index(), expected)
+            self.assert_eq(
+                (psser1 - psser2 / psser3).sort_index(), (pser1 - pser2 / pser3).sort_index()
+            )
         else:
             assert_eq((psser1 - psser2 / psser3).sort_index(), (pser1 - pser2 / pser3).sort_index())
 
@@ -503,6 +482,12 @@ class OpsOnDiffFramesEnabledTest(PandasOnSparkTestCase, SQLTestUtils):
             (pdf1.A + 1).loc[pdf2.A > -3].sort_index(), (psdf1.A + 1).loc[psdf2.A > -3].sort_index()
         )
 
+        pser = pd.Series([0, 1, 2, 3, 4], index=[20, 10, 30, 0, 50])
+        psser = ps.from_pandas(pser)
+        self.assert_eq(pser.loc[pdf2.A > -3].sort_index(), psser.loc[psdf2.A > -3].sort_index())
+        pser.name = psser.name = "B"
+        self.assert_eq(pser.loc[pdf2.A > -3].sort_index(), psser.loc[psdf2.A > -3].sort_index())
+
     def test_bitwise(self):
         pser1 = pd.Series([True, False, True, False, np.nan, np.nan, True, False, np.nan])
         pser2 = pd.Series([True, False, False, True, True, False, np.nan, np.nan, np.nan])
@@ -562,6 +547,11 @@ class OpsOnDiffFramesEnabledTest(PandasOnSparkTestCase, SQLTestUtils):
             ),
         )
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43453): Enable OpsOnDiffFramesEnabledTests.test_concat_column_axis "
+        "for pandas 2.0.0.",
+    )
     def test_concat_column_axis(self):
         pdf1 = pd.DataFrame({"A": [0, 2, 4], "B": [1, 3, 5]}, index=[1, 2, 3])
         pdf1.columns.names = ["AB"]
@@ -612,6 +602,16 @@ class OpsOnDiffFramesEnabledTest(PandasOnSparkTestCase, SQLTestUtils):
                     self.assert_eq(
                         repr(actual.sort_values(list(actual.columns)).reset_index(drop=True)),
                         repr(expected.sort_values(list(expected.columns)).reset_index(drop=True)),
+                    )
+                    actual = ps.concat(
+                        psdfs, axis=1, ignore_index=ignore_index, join=join, sort=True
+                    )
+                    expected = pd.concat(
+                        pdfs, axis=1, ignore_index=ignore_index, join=join, sort=True
+                    )
+                    self.assert_eq(
+                        repr(actual.reset_index(drop=True)),
+                        repr(expected.reset_index(drop=True)),
                     )
 
     def test_combine_first(self):
@@ -904,6 +904,17 @@ class OpsOnDiffFramesEnabledTest(PandasOnSparkTestCase, SQLTestUtils):
                 ),
             )
             psser1.compare(psser2)
+        # SPARK-37495: Skip identical index checking of Series.compare when config
+        # 'compute.eager_check' is disabled
+        psser1 = ps.Series([1, 2, 3, 4, 5], index=pd.Index([1, 2, 3, 4, 5]))
+        psser2 = ps.Series([1, 2, 3, 4, 5, 6], index=pd.Index([1, 2, 4, 3, 6, 7]))
+        expected = ps.DataFrame(
+            {"self": [3, 4, 5, np.nan, np.nan], "other": [4, 3, np.nan, 5.0, 6.0]},
+            index=[3, 4, 5, 6, 7],
+        )
+
+        with ps.option_context("compute.eager_check", False):
+            self.assert_eq(expected, psser1.compare(psser2))
 
     def test_different_columns(self):
         psdf1 = self.psdf1
@@ -1111,690 +1122,8 @@ class OpsOnDiffFramesEnabledTest(PandasOnSparkTestCase, SQLTestUtils):
 
         self.assert_eq(psdf.sort_index(), pdf.sort_index())
 
-    def test_frame_loc_setitem(self):
-        pdf_orig = pd.DataFrame(
-            [[1, 2], [4, 5], [7, 8]],
-            index=["cobra", "viper", "sidewinder"],
-            columns=["max_speed", "shield"],
-        )
-        psdf_orig = ps.DataFrame(pdf_orig)
 
-        pdf = pdf_orig.copy()
-        psdf = psdf_orig.copy()
-        pser1 = pdf.max_speed
-        pser2 = pdf.shield
-        psser1 = psdf.max_speed
-        psser2 = psdf.shield
-
-        another_psdf = ps.DataFrame(pdf_orig)
-
-        psdf.loc[["viper", "sidewinder"], ["shield"]] = -another_psdf.max_speed
-        pdf.loc[["viper", "sidewinder"], ["shield"]] = -pdf.max_speed
-        self.assert_eq(psdf, pdf)
-        self.assert_eq(psser1, pser1)
-        self.assert_eq(psser2, pser2)
-
-        pdf = pdf_orig.copy()
-        psdf = psdf_orig.copy()
-        pser1 = pdf.max_speed
-        pser2 = pdf.shield
-        psser1 = psdf.max_speed
-        psser2 = psdf.shield
-        psdf.loc[another_psdf.max_speed < 5, ["shield"]] = -psdf.max_speed
-        pdf.loc[pdf.max_speed < 5, ["shield"]] = -pdf.max_speed
-        self.assert_eq(psdf, pdf)
-        self.assert_eq(psser1, pser1)
-        self.assert_eq(psser2, pser2)
-
-        pdf = pdf_orig.copy()
-        psdf = psdf_orig.copy()
-        pser1 = pdf.max_speed
-        pser2 = pdf.shield
-        psser1 = psdf.max_speed
-        psser2 = psdf.shield
-        psdf.loc[another_psdf.max_speed < 5, ["shield"]] = -another_psdf.max_speed
-        pdf.loc[pdf.max_speed < 5, ["shield"]] = -pdf.max_speed
-        self.assert_eq(psdf, pdf)
-        self.assert_eq(psser1, pser1)
-        self.assert_eq(psser2, pser2)
-
-    def test_frame_iloc_setitem(self):
-        pdf = pd.DataFrame(
-            [[1, 2], [4, 5], [7, 8]],
-            index=["cobra", "viper", "sidewinder"],
-            columns=["max_speed", "shield"],
-        )
-        psdf = ps.DataFrame(pdf)
-        another_psdf = ps.DataFrame(pdf)
-
-        psdf.iloc[[0, 1, 2], 1] = -another_psdf.max_speed
-        pdf.iloc[[0, 1, 2], 1] = -pdf.max_speed
-        self.assert_eq(psdf, pdf)
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "shape mismatch",
-        ):
-            psdf.iloc[[1, 2], [1]] = -another_psdf.max_speed
-
-        psdf.iloc[[0, 1, 2], 1] = 10 * another_psdf.max_speed
-        pdf.iloc[[0, 1, 2], 1] = 10 * pdf.max_speed
-        self.assert_eq(psdf, pdf)
-
-        with self.assertRaisesRegex(ValueError, "shape mismatch"):
-            psdf.iloc[[0], 1] = 10 * another_psdf.max_speed
-
-    def test_series_loc_setitem(self):
-        pdf = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]}, index=["cobra", "viper", "sidewinder"])
-        psdf = ps.from_pandas(pdf)
-        pser = pdf.x
-        psery = pdf.y
-        psser = psdf.x
-        pssery = psdf.y
-
-        pser_another = pd.Series([1, 2, 3], index=["cobra", "viper", "sidewinder"])
-        psser_another = ps.from_pandas(pser_another)
-
-        psser.loc[psser % 2 == 1] = -psser_another
-        pser.loc[pser % 2 == 1] = -pser_another
-        self.assert_eq(psser, pser)
-        self.assert_eq(psdf, pdf)
-        self.assert_eq(pssery, psery)
-
-        pdf = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]}, index=["cobra", "viper", "sidewinder"])
-        psdf = ps.from_pandas(pdf)
-        pser = pdf.x
-        psery = pdf.y
-        psser = psdf.x
-        pssery = psdf.y
-        psser.loc[psser_another % 2 == 1] = -psser
-        pser.loc[pser_another % 2 == 1] = -pser
-        self.assert_eq(psser, pser)
-        self.assert_eq(psdf, pdf)
-        self.assert_eq(pssery, psery)
-
-        pdf = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]}, index=["cobra", "viper", "sidewinder"])
-        psdf = ps.from_pandas(pdf)
-        pser = pdf.x
-        psery = pdf.y
-        psser = psdf.x
-        pssery = psdf.y
-        psser.loc[psser_another % 2 == 1] = -psser
-        pser.loc[pser_another % 2 == 1] = -pser
-        self.assert_eq(psser, pser)
-        self.assert_eq(psdf, pdf)
-        self.assert_eq(pssery, psery)
-
-        pdf = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]}, index=["cobra", "viper", "sidewinder"])
-        psdf = ps.from_pandas(pdf)
-        pser = pdf.x
-        psery = pdf.y
-        psser = psdf.x
-        pssery = psdf.y
-        psser.loc[psser_another % 2 == 1] = -psser_another
-        pser.loc[pser_another % 2 == 1] = -pser_another
-        self.assert_eq(psser, pser)
-        self.assert_eq(psdf, pdf)
-        self.assert_eq(pssery, psery)
-
-        pdf = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]}, index=["cobra", "viper", "sidewinder"])
-        psdf = ps.from_pandas(pdf)
-        pser = pdf.x
-        psery = pdf.y
-        psser = psdf.x
-        pssery = psdf.y
-        psser.loc[["viper", "sidewinder"]] = -psser_another
-        pser.loc[["viper", "sidewinder"]] = -pser_another
-        self.assert_eq(psser, pser)
-        self.assert_eq(psdf, pdf)
-        self.assert_eq(pssery, psery)
-
-        pdf = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]}, index=["cobra", "viper", "sidewinder"])
-        psdf = ps.from_pandas(pdf)
-        pser = pdf.x
-        psery = pdf.y
-        psser = psdf.x
-        pssery = psdf.y
-        psser.loc[psser_another % 2 == 1] = 10
-        pser.loc[pser_another % 2 == 1] = 10
-        self.assert_eq(psser, pser)
-        self.assert_eq(psdf, pdf)
-        self.assert_eq(pssery, psery)
-
-    def test_series_iloc_setitem(self):
-        pdf = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]}, index=["cobra", "viper", "sidewinder"])
-        psdf = ps.from_pandas(pdf)
-
-        pser = pdf.x
-        psery = pdf.y
-        psser = psdf.x
-        pssery = psdf.y
-
-        pser1 = pser + 1
-        psser1 = psser + 1
-
-        pser_another = pd.Series([1, 2, 3], index=["cobra", "viper", "sidewinder"])
-        psser_another = ps.from_pandas(pser_another)
-
-        psser.iloc[[0, 1, 2]] = -psser_another
-        pser.iloc[[0, 1, 2]] = -pser_another
-        self.assert_eq(psser, pser)
-        self.assert_eq(psdf, pdf)
-        self.assert_eq(pssery, psery)
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "cannot set using a list-like indexer with a different length than the value",
-        ):
-            psser.iloc[[1, 2]] = -psser_another
-
-        psser.iloc[[0, 1, 2]] = 10 * psser_another
-        pser.iloc[[0, 1, 2]] = 10 * pser_another
-        self.assert_eq(psser, pser)
-        self.assert_eq(psdf, pdf)
-        self.assert_eq(pssery, psery)
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "cannot set using a list-like indexer with a different length than the value",
-        ):
-            psser.iloc[[0]] = 10 * psser_another
-
-        psser1.iloc[[0, 1, 2]] = -psser_another
-        pser1.iloc[[0, 1, 2]] = -pser_another
-        self.assert_eq(psser1, pser1)
-        self.assert_eq(psdf, pdf)
-        self.assert_eq(pssery, psery)
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "cannot set using a list-like indexer with a different length than the value",
-        ):
-            psser1.iloc[[1, 2]] = -psser_another
-
-        pdf = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]}, index=["cobra", "viper", "sidewinder"])
-        psdf = ps.from_pandas(pdf)
-
-        pser = pdf.x
-        psery = pdf.y
-        psser = psdf.x
-        pssery = psdf.y
-
-        piloc = pser.iloc
-        kiloc = psser.iloc
-
-        kiloc[[0, 1, 2]] = -psser_another
-        piloc[[0, 1, 2]] = -pser_another
-        self.assert_eq(psser, pser)
-        self.assert_eq(psdf, pdf)
-        self.assert_eq(pssery, psery)
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "cannot set using a list-like indexer with a different length than the value",
-        ):
-            kiloc[[1, 2]] = -psser_another
-
-        kiloc[[0, 1, 2]] = 10 * psser_another
-        piloc[[0, 1, 2]] = 10 * pser_another
-        self.assert_eq(psser, pser)
-        self.assert_eq(psdf, pdf)
-        self.assert_eq(pssery, psery)
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "cannot set using a list-like indexer with a different length than the value",
-        ):
-            kiloc[[0]] = 10 * psser_another
-
-    def test_update(self):
-        pdf = pd.DataFrame({"x": [1, 2, 3], "y": [10, 20, 30]})
-        psdf = ps.from_pandas(pdf)
-
-        pser = pdf.x
-        psser = psdf.x
-        pser.update(pd.Series([4, 5, 6]))
-        psser.update(ps.Series([4, 5, 6]))
-        self.assert_eq(psser.sort_index(), pser.sort_index())
-        self.assert_eq(psdf.sort_index(), pdf.sort_index())
-
-    def test_where(self):
-        pdf1 = pd.DataFrame({"A": [0, 1, 2, 3, 4], "B": [100, 200, 300, 400, 500]})
-        pdf2 = pd.DataFrame({"A": [0, -1, -2, -3, -4], "B": [-100, -200, -300, -400, -500]})
-        psdf1 = ps.from_pandas(pdf1)
-        psdf2 = ps.from_pandas(pdf2)
-
-        self.assert_eq(pdf1.where(pdf2 > 100), psdf1.where(psdf2 > 100).sort_index())
-
-        pdf1 = pd.DataFrame({"A": [-1, -2, -3, -4, -5], "B": [-100, -200, -300, -400, -500]})
-        pdf2 = pd.DataFrame({"A": [-10, -20, -30, -40, -50], "B": [-5, -4, -3, -2, -1]})
-        psdf1 = ps.from_pandas(pdf1)
-        psdf2 = ps.from_pandas(pdf2)
-
-        self.assert_eq(pdf1.where(pdf2 < -250), psdf1.where(psdf2 < -250).sort_index())
-
-        # multi-index columns
-        pdf1 = pd.DataFrame({("X", "A"): [0, 1, 2, 3, 4], ("X", "B"): [100, 200, 300, 400, 500]})
-        pdf2 = pd.DataFrame(
-            {("X", "A"): [0, -1, -2, -3, -4], ("X", "B"): [-100, -200, -300, -400, -500]}
-        )
-        psdf1 = ps.from_pandas(pdf1)
-        psdf2 = ps.from_pandas(pdf2)
-
-        self.assert_eq(pdf1.where(pdf2 > 100), psdf1.where(psdf2 > 100).sort_index())
-
-    def test_mask(self):
-        pdf1 = pd.DataFrame({"A": [0, 1, 2, 3, 4], "B": [100, 200, 300, 400, 500]})
-        pdf2 = pd.DataFrame({"A": [0, -1, -2, -3, -4], "B": [-100, -200, -300, -400, -500]})
-        psdf1 = ps.from_pandas(pdf1)
-        psdf2 = ps.from_pandas(pdf2)
-
-        self.assert_eq(pdf1.mask(pdf2 < 100), psdf1.mask(psdf2 < 100).sort_index())
-
-        pdf1 = pd.DataFrame({"A": [-1, -2, -3, -4, -5], "B": [-100, -200, -300, -400, -500]})
-        pdf2 = pd.DataFrame({"A": [-10, -20, -30, -40, -50], "B": [-5, -4, -3, -2, -1]})
-        psdf1 = ps.from_pandas(pdf1)
-        psdf2 = ps.from_pandas(pdf2)
-
-        self.assert_eq(pdf1.mask(pdf2 > -250), psdf1.mask(psdf2 > -250).sort_index())
-
-        # multi-index columns
-        pdf1 = pd.DataFrame({("X", "A"): [0, 1, 2, 3, 4], ("X", "B"): [100, 200, 300, 400, 500]})
-        pdf2 = pd.DataFrame(
-            {("X", "A"): [0, -1, -2, -3, -4], ("X", "B"): [-100, -200, -300, -400, -500]}
-        )
-        psdf1 = ps.from_pandas(pdf1)
-        psdf2 = ps.from_pandas(pdf2)
-
-        self.assert_eq(pdf1.mask(pdf2 < 100), psdf1.mask(psdf2 < 100).sort_index())
-
-    def test_multi_index_column_assignment_frame(self):
-        pdf = pd.DataFrame({"a": [1, 2, 3, 2], "b": [4.0, 2.0, 3.0, 1.0]})
-        pdf.columns = pd.MultiIndex.from_tuples([("a", "x"), ("a", "y")])
-        psdf = ps.DataFrame(pdf)
-
-        psdf["c"] = ps.Series([10, 20, 30, 20])
-        pdf["c"] = pd.Series([10, 20, 30, 20])
-
-        psdf[("d", "x")] = ps.Series([100, 200, 300, 200], name="1")
-        pdf[("d", "x")] = pd.Series([100, 200, 300, 200], name="1")
-
-        psdf[("d", "y")] = ps.Series([1000, 2000, 3000, 2000], name=("1", "2"))
-        pdf[("d", "y")] = pd.Series([1000, 2000, 3000, 2000], name=("1", "2"))
-
-        psdf["e"] = ps.Series([10000, 20000, 30000, 20000], name=("1", "2", "3"))
-        pdf["e"] = pd.Series([10000, 20000, 30000, 20000], name=("1", "2", "3"))
-
-        psdf[[("f", "x"), ("f", "y")]] = ps.DataFrame(
-            {"1": [100000, 200000, 300000, 200000], "2": [1000000, 2000000, 3000000, 2000000]}
-        )
-        pdf[[("f", "x"), ("f", "y")]] = pd.DataFrame(
-            {"1": [100000, 200000, 300000, 200000], "2": [1000000, 2000000, 3000000, 2000000]}
-        )
-
-        self.assert_eq(repr(psdf.sort_index()), repr(pdf))
-
-        with self.assertRaisesRegex(KeyError, "Key length \\(3\\) exceeds index depth \\(2\\)"):
-            psdf[("1", "2", "3")] = ps.Series([100, 200, 300, 200])
-
-    def test_series_dot(self):
-        pser = pd.Series([90, 91, 85], index=[2, 4, 1])
-        psser = ps.from_pandas(pser)
-        pser_other = pd.Series([90, 91, 85], index=[2, 4, 1])
-        psser_other = ps.from_pandas(pser_other)
-
-        self.assert_eq(psser.dot(psser_other), pser.dot(pser_other))
-
-        psser_other = ps.Series([90, 91, 85], index=[1, 2, 4])
-        pser_other = pd.Series([90, 91, 85], index=[1, 2, 4])
-
-        self.assert_eq(psser.dot(psser_other), pser.dot(pser_other))
-
-        # length of index is different
-        psser_other = ps.Series([90, 91, 85, 100], index=[2, 4, 1, 0])
-        with self.assertRaisesRegex(ValueError, "matrices are not aligned"):
-            psser.dot(psser_other)
-
-        # for MultiIndex
-        midx = pd.MultiIndex(
-            [["lama", "cow", "falcon"], ["speed", "weight", "length"]],
-            [[0, 0, 0, 1, 1, 1, 2, 2, 2], [0, 1, 2, 0, 1, 2, 0, 1, 2]],
-        )
-        pser = pd.Series([45, 200, 1.2, 30, 250, 1.5, 320, 1, 0.3], index=midx)
-        psser = ps.from_pandas(pser)
-        pser_other = pd.Series([-450, 20, 12, -30, -250, 15, -320, 100, 3], index=midx)
-        psser_other = ps.from_pandas(pser_other)
-        self.assert_eq(psser.dot(psser_other), pser.dot(pser_other))
-
-        pser = pd.Series([0, 1, 2, 3])
-        psser = ps.from_pandas(pser)
-
-        # DataFrame "other" without Index/MultiIndex as columns
-        pdf = pd.DataFrame([[0, 1], [-2, 3], [4, -5], [6, 7]])
-        psdf = ps.from_pandas(pdf)
-        self.assert_eq(psser.dot(psdf), pser.dot(pdf))
-
-        # DataFrame "other" with Index as columns
-        pdf.columns = pd.Index(["x", "y"])
-        psdf = ps.from_pandas(pdf)
-        self.assert_eq(psser.dot(psdf), pser.dot(pdf))
-        pdf.columns = pd.Index(["x", "y"], name="cols_name")
-        psdf = ps.from_pandas(pdf)
-        self.assert_eq(psser.dot(psdf), pser.dot(pdf))
-
-        pdf = pdf.reindex([1, 0, 2, 3])
-        psdf = ps.from_pandas(pdf)
-        self.assert_eq(psser.dot(psdf), pser.dot(pdf))
-
-        # DataFrame "other" with MultiIndex as columns
-        pdf.columns = pd.MultiIndex.from_tuples([("a", "x"), ("b", "y")])
-        psdf = ps.from_pandas(pdf)
-        self.assert_eq(psser.dot(psdf), pser.dot(pdf))
-        pdf.columns = pd.MultiIndex.from_tuples(
-            [("a", "x"), ("b", "y")], names=["cols_name1", "cols_name2"]
-        )
-        psdf = ps.from_pandas(pdf)
-        self.assert_eq(psser.dot(psdf), pser.dot(pdf))
-
-        psser = ps.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}).b
-        pser = psser.to_pandas()
-        psdf = ps.DataFrame({"c": [7, 8, 9]})
-        pdf = psdf.to_pandas()
-        self.assert_eq(psser.dot(psdf), pser.dot(pdf))
-
-    def test_frame_dot(self):
-        pdf = pd.DataFrame([[0, 1, -2, -1], [1, 1, 1, 1]])
-        psdf = ps.from_pandas(pdf)
-
-        pser = pd.Series([1, 1, 2, 1])
-        psser = ps.from_pandas(pser)
-        self.assert_eq(psdf.dot(psser), pdf.dot(pser))
-
-        # Index reorder
-        pser = pser.reindex([1, 0, 2, 3])
-        psser = ps.from_pandas(pser)
-        self.assert_eq(psdf.dot(psser), pdf.dot(pser))
-
-        # ser with name
-        pser.name = "ser"
-        psser = ps.from_pandas(pser)
-        self.assert_eq(psdf.dot(psser), pdf.dot(pser))
-
-        # df with MultiIndex as column (ser with MultiIndex)
-        arrays = [[1, 1, 2, 2], ["red", "blue", "red", "blue"]]
-        pidx = pd.MultiIndex.from_arrays(arrays, names=("number", "color"))
-        pser = pd.Series([1, 1, 2, 1], index=pidx)
-        pdf = pd.DataFrame([[0, 1, -2, -1], [1, 1, 1, 1]], columns=pidx)
-        psdf = ps.from_pandas(pdf)
-        psser = ps.from_pandas(pser)
-        self.assert_eq(psdf.dot(psser), pdf.dot(pser))
-
-        # df with Index as column (ser with Index)
-        pidx = pd.Index([1, 2, 3, 4], name="number")
-        pser = pd.Series([1, 1, 2, 1], index=pidx)
-        pdf = pd.DataFrame([[0, 1, -2, -1], [1, 1, 1, 1]], columns=pidx)
-        psdf = ps.from_pandas(pdf)
-        psser = ps.from_pandas(pser)
-        self.assert_eq(psdf.dot(psser), pdf.dot(pser))
-
-        # df with Index
-        pdf.index = pd.Index(["x", "y"], name="char")
-        psdf = ps.from_pandas(pdf)
-        self.assert_eq(psdf.dot(psser), pdf.dot(pser))
-
-        # df with MultiIndex
-        pdf.index = pd.MultiIndex.from_arrays([[1, 1], ["red", "blue"]], names=("number", "color"))
-        psdf = ps.from_pandas(pdf)
-        self.assert_eq(psdf.dot(psser), pdf.dot(pser))
-
-        pdf = pd.DataFrame([[1, 2], [3, 4]])
-        psdf = ps.from_pandas(pdf)
-        self.assert_eq(psdf.dot(psdf[0]), pdf.dot(pdf[0]))
-        self.assert_eq(psdf.dot(psdf[0] * 10), pdf.dot(pdf[0] * 10))
-        self.assert_eq((psdf + 1).dot(psdf[0] * 10), (pdf + 1).dot(pdf[0] * 10))
-
-    def test_to_series_comparison(self):
-        psidx1 = ps.Index([1, 2, 3, 4, 5])
-        psidx2 = ps.Index([1, 2, 3, 4, 5])
-
-        self.assert_eq((psidx1.to_series() == psidx2.to_series()).all(), True)
-
-        psidx1.name = "koalas"
-        psidx2.name = "koalas"
-
-        self.assert_eq((psidx1.to_series() == psidx2.to_series()).all(), True)
-
-    def test_series_repeat(self):
-        pser1 = pd.Series(["a", "b", "c"], name="a")
-        pser2 = pd.Series([10, 20, 30], name="rep")
-        psser1 = ps.from_pandas(pser1)
-        psser2 = ps.from_pandas(pser2)
-
-        self.assert_eq(psser1.repeat(psser2).sort_index(), pser1.repeat(pser2).sort_index())
-
-    def test_series_ops(self):
-        pser1 = pd.Series([1, 2, 3, 4, 5, 6, 7], name="x", index=[11, 12, 13, 14, 15, 16, 17])
-        pser2 = pd.Series([1, 2, 3, 4, 5, 6, 7], name="x", index=[11, 12, 13, 14, 15, 16, 17])
-        pidx1 = pd.Index([10, 11, 12, 13, 14, 15, 16], name="x")
-        psser1 = ps.from_pandas(pser1)
-        psser2 = ps.from_pandas(pser2)
-        psidx1 = ps.from_pandas(pidx1)
-
-        self.assert_eq(
-            (psser1 + 1 + 10 * psser2).sort_index(), (pser1 + 1 + 10 * pser2).sort_index()
-        )
-        self.assert_eq(
-            (psser1 + 1 + 10 * psser2.rename()).sort_index(),
-            (pser1 + 1 + 10 * pser2.rename()).sort_index(),
-        )
-        self.assert_eq(
-            (psser1.rename() + 1 + 10 * psser2).sort_index(),
-            (pser1.rename() + 1 + 10 * pser2).sort_index(),
-        )
-        self.assert_eq(
-            (psser1.rename() + 1 + 10 * psser2.rename()).sort_index(),
-            (pser1.rename() + 1 + 10 * pser2.rename()).sort_index(),
-        )
-
-        self.assert_eq(psser1 + 1 + 10 * psidx1, pser1 + 1 + 10 * pidx1)
-        self.assert_eq(psser1.rename() + 1 + 10 * psidx1, pser1.rename() + 1 + 10 * pidx1)
-        self.assert_eq(psser1 + 1 + 10 * psidx1.rename(None), pser1 + 1 + 10 * pidx1.rename(None))
-        self.assert_eq(
-            psser1.rename() + 1 + 10 * psidx1.rename(None),
-            pser1.rename() + 1 + 10 * pidx1.rename(None),
-        )
-
-        self.assert_eq(psidx1 + 1 + 10 * psser1, pidx1 + 1 + 10 * pser1)
-        self.assert_eq(psidx1 + 1 + 10 * psser1.rename(), pidx1 + 1 + 10 * pser1.rename())
-        self.assert_eq(psidx1.rename(None) + 1 + 10 * psser1, pidx1.rename(None) + 1 + 10 * pser1)
-        self.assert_eq(
-            psidx1.rename(None) + 1 + 10 * psser1.rename(),
-            pidx1.rename(None) + 1 + 10 * pser1.rename(),
-        )
-
-        pidx2 = pd.Index([11, 12, 13])
-        psidx2 = ps.from_pandas(pidx2)
-
-        with self.assertRaisesRegex(
-            ValueError, "operands could not be broadcast together with shapes"
-        ):
-            psser1 + psidx2
-
-        with self.assertRaisesRegex(
-            ValueError, "operands could not be broadcast together with shapes"
-        ):
-            psidx2 + psser1
-
-    def test_index_ops(self):
-        pidx1 = pd.Index([1, 2, 3, 4, 5], name="x")
-        pidx2 = pd.Index([6, 7, 8, 9, 10], name="x")
-        psidx1 = ps.from_pandas(pidx1)
-        psidx2 = ps.from_pandas(pidx2)
-
-        self.assert_eq(psidx1 * 10 + psidx2, pidx1 * 10 + pidx2)
-        self.assert_eq(psidx1.rename(None) * 10 + psidx2, pidx1.rename(None) * 10 + pidx2)
-
-        if LooseVersion(pd.__version__) >= LooseVersion("1.0"):
-            self.assert_eq(psidx1 * 10 + psidx2.rename(None), pidx1 * 10 + pidx2.rename(None))
-        else:
-            self.assert_eq(
-                psidx1 * 10 + psidx2.rename(None), (pidx1 * 10 + pidx2.rename(None)).rename(None)
-            )
-
-        pidx3 = pd.Index([11, 12, 13])
-        psidx3 = ps.from_pandas(pidx3)
-
-        with self.assertRaisesRegex(
-            ValueError, "operands could not be broadcast together with shapes"
-        ):
-            psidx1 + psidx3
-
-        pidx1 = pd.Index([1, 2, 3, 4, 5], name="a")
-        pidx2 = pd.Index([6, 7, 8, 9, 10], name="a")
-        pidx3 = pd.Index([11, 12, 13, 14, 15], name="x")
-        psidx1 = ps.from_pandas(pidx1)
-        psidx2 = ps.from_pandas(pidx2)
-        psidx3 = ps.from_pandas(pidx3)
-
-        self.assert_eq(psidx1 * 10 + psidx2, pidx1 * 10 + pidx2)
-
-        if LooseVersion(pd.__version__) >= LooseVersion("1.0"):
-            self.assert_eq(psidx1 * 10 + psidx3, pidx1 * 10 + pidx3)
-        else:
-            self.assert_eq(psidx1 * 10 + psidx3, (pidx1 * 10 + pidx3).rename(None))
-
-    def test_align(self):
-        pdf1 = pd.DataFrame({"a": [1, 2, 3], "b": ["a", "b", "c"]}, index=[10, 20, 30])
-        pdf2 = pd.DataFrame({"a": [4, 5, 6], "c": ["d", "e", "f"]}, index=[10, 11, 12])
-        psdf1 = ps.from_pandas(pdf1)
-        psdf2 = ps.from_pandas(pdf2)
-
-        for join in ["outer", "inner", "left", "right"]:
-            for axis in [None, 0]:
-                psdf_l, psdf_r = psdf1.align(psdf2, join=join, axis=axis)
-                pdf_l, pdf_r = pdf1.align(pdf2, join=join, axis=axis)
-                self.assert_eq(psdf_l.sort_index(), pdf_l.sort_index())
-                self.assert_eq(psdf_r.sort_index(), pdf_r.sort_index())
-
-        pser1 = pd.Series([7, 8, 9], index=[10, 11, 12])
-        pser2 = pd.Series(["g", "h", "i"], index=[10, 20, 30])
-        psser1 = ps.from_pandas(pser1)
-        psser2 = ps.from_pandas(pser2)
-
-        for join in ["outer", "inner", "left", "right"]:
-            psser_l, psser_r = psser1.align(psser2, join=join)
-            pser_l, pser_r = pser1.align(pser2, join=join)
-            self.assert_eq(psser_l.sort_index(), pser_l.sort_index())
-            self.assert_eq(psser_r.sort_index(), pser_r.sort_index())
-
-            psdf_l, psser_r = psdf1.align(psser1, join=join, axis=0)
-            pdf_l, pser_r = pdf1.align(pser1, join=join, axis=0)
-            self.assert_eq(psdf_l.sort_index(), pdf_l.sort_index())
-            self.assert_eq(psser_r.sort_index(), pser_r.sort_index())
-
-            psser_l, psdf_r = psser1.align(psdf1, join=join)
-            pser_l, pdf_r = pser1.align(pdf1, join=join)
-            self.assert_eq(psser_l.sort_index(), pser_l.sort_index())
-            self.assert_eq(psdf_r.sort_index(), pdf_r.sort_index())
-
-        # multi-index columns
-        pdf3 = pd.DataFrame(
-            {("x", "a"): [4, 5, 6], ("y", "c"): ["d", "e", "f"]}, index=[10, 11, 12]
-        )
-        psdf3 = ps.from_pandas(pdf3)
-        pser3 = pdf3[("y", "c")]
-        psser3 = psdf3[("y", "c")]
-
-        for join in ["outer", "inner", "left", "right"]:
-            psdf_l, psdf_r = psdf1.align(psdf3, join=join, axis=0)
-            pdf_l, pdf_r = pdf1.align(pdf3, join=join, axis=0)
-            self.assert_eq(psdf_l.sort_index(), pdf_l.sort_index())
-            self.assert_eq(psdf_r.sort_index(), pdf_r.sort_index())
-
-            psser_l, psser_r = psser1.align(psser3, join=join)
-            pser_l, pser_r = pser1.align(pser3, join=join)
-            self.assert_eq(psser_l.sort_index(), pser_l.sort_index())
-            self.assert_eq(psser_r.sort_index(), pser_r.sort_index())
-
-            psdf_l, psser_r = psdf1.align(psser3, join=join, axis=0)
-            pdf_l, pser_r = pdf1.align(pser3, join=join, axis=0)
-            self.assert_eq(psdf_l.sort_index(), pdf_l.sort_index())
-            self.assert_eq(psser_r.sort_index(), pser_r.sort_index())
-
-            psser_l, psdf_r = psser3.align(psdf1, join=join)
-            pser_l, pdf_r = pser3.align(pdf1, join=join)
-            self.assert_eq(psser_l.sort_index(), pser_l.sort_index())
-            self.assert_eq(psdf_r.sort_index(), pdf_r.sort_index())
-
-        self.assertRaises(ValueError, lambda: psdf1.align(psdf3, axis=None))
-        self.assertRaises(ValueError, lambda: psdf1.align(psdf3, axis=1))
-
-    def test_pow_and_rpow(self):
-        pser = pd.Series([1, 2, np.nan])
-        psser = ps.from_pandas(pser)
-        pser_other = pd.Series([np.nan, 2, 3])
-        psser_other = ps.from_pandas(pser_other)
-
-        self.assert_eq(pser.pow(pser_other), psser.pow(psser_other).sort_index())
-        self.assert_eq(pser ** pser_other, (psser ** psser_other).sort_index())
-        self.assert_eq(pser.rpow(pser_other), psser.rpow(psser_other).sort_index())
-
-    def test_shift(self):
-        pdf = pd.DataFrame(
-            {
-                "Col1": [10, 20, 15, 30, 45],
-                "Col2": [13, 23, 18, 33, 48],
-                "Col3": [17, 27, 22, 37, 52],
-            },
-            index=np.random.rand(5),
-        )
-        psdf = ps.from_pandas(pdf)
-
-        self.assert_eq(
-            pdf.shift().loc[pdf["Col1"] == 20].astype(int), psdf.shift().loc[psdf["Col1"] == 20]
-        )
-        self.assert_eq(
-            pdf["Col2"].shift().loc[pdf["Col1"] == 20].astype(int),
-            psdf["Col2"].shift().loc[psdf["Col1"] == 20],
-        )
-
-    def test_diff(self):
-        pdf = pd.DataFrame(
-            {
-                "Col1": [10, 20, 15, 30, 45],
-                "Col2": [13, 23, 18, 33, 48],
-                "Col3": [17, 27, 22, 37, 52],
-            },
-            index=np.random.rand(5),
-        )
-        psdf = ps.from_pandas(pdf)
-
-        self.assert_eq(
-            pdf.diff().loc[pdf["Col1"] == 20].astype(int), psdf.diff().loc[psdf["Col1"] == 20]
-        )
-        self.assert_eq(
-            pdf["Col2"].diff().loc[pdf["Col1"] == 20].astype(int),
-            psdf["Col2"].diff().loc[psdf["Col1"] == 20],
-        )
-
-    def test_rank(self):
-        pdf = pd.DataFrame(
-            {
-                "Col1": [10, 20, 15, 30, 45],
-                "Col2": [13, 23, 18, 33, 48],
-                "Col3": [17, 27, 22, 37, 52],
-            },
-            index=np.random.rand(5),
-        )
-        psdf = ps.from_pandas(pdf)
-
-        self.assert_eq(pdf.rank().loc[pdf["Col1"] == 20], psdf.rank().loc[psdf["Col1"] == 20])
-        self.assert_eq(
-            pdf["Col2"].rank().loc[pdf["Col1"] == 20], psdf["Col2"].rank().loc[psdf["Col1"] == 20]
-        )
-
-
-class OpsOnDiffFramesDisabledTest(PandasOnSparkTestCase, SQLTestUtils):
+class OpsOnDiffFramesDisabledTestsMixin:
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -1956,9 +1285,16 @@ class OpsOnDiffFramesDisabledTest(PandasOnSparkTestCase, SQLTestUtils):
         with self.assertRaisesRegex(ValueError, "Cannot combine the series or dataframe"):
             psser.pow(psser_other)
         with self.assertRaisesRegex(ValueError, "Cannot combine the series or dataframe"):
-            psser ** psser_other
+            psser**psser_other
         with self.assertRaisesRegex(ValueError, "Cannot combine the series or dataframe"):
             psser.rpow(psser_other)
+
+    def test_equals(self):
+        psidx1 = ps.Index([1, 2, 3, 4])
+        psidx2 = ps.Index([1, 2, 3, 4])
+
+        with self.assertRaisesRegex(ValueError, "Cannot combine the series or dataframe"):
+            psidx1.equals(psidx2)
 
     def test_combine_first(self):
         pdf1 = pd.DataFrame({"A": [None, 0], "B": [4, None]})
@@ -1980,12 +1316,38 @@ class OpsOnDiffFramesDisabledTest(PandasOnSparkTestCase, SQLTestUtils):
         with self.assertRaisesRegex(ValueError, "Cannot combine the series or dataframe"):
             psdf1.combine_first(psdf2)
 
+    def test_series_eq(self):
+        pser = pd.Series([1, 2, 3, 4, 5, 6], name="x")
+        psser = ps.from_pandas(pser)
+
+        others = (
+            ps.Series([np.nan, 1, 3, 4, np.nan, 6], name="x"),
+            ps.Index([np.nan, 1, 3, 4, np.nan, 6], name="x"),
+        )
+        for other in others:
+            with self.assertRaisesRegex(ValueError, "Cannot combine the series or dataframe"):
+                psser.eq(other)
+            with self.assertRaisesRegex(ValueError, "Cannot combine the series or dataframe"):
+                psser == other
+
+
+class OpsOnDiffFramesEnabledTests(
+    OpsOnDiffFramesEnabledTestsMixin, PandasOnSparkTestCase, SQLTestUtils
+):
+    pass
+
+
+class OpsOnDiffFramesDisabledTests(
+    OpsOnDiffFramesDisabledTestsMixin, PandasOnSparkTestCase, SQLTestUtils
+):
+    pass
+
 
 if __name__ == "__main__":
     from pyspark.pandas.tests.test_ops_on_diff_frames import *  # noqa: F401
 
     try:
-        import xmlrunner  # type: ignore[import]
+        import xmlrunner
 
         testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
     except ImportError:

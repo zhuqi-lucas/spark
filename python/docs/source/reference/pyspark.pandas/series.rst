@@ -1,3 +1,21 @@
+..  Licensed to the Apache Software Foundation (ASF) under one
+    or more contributor license agreements.  See the NOTICE file
+    distributed with this work for additional information
+    regarding copyright ownership.  The ASF licenses this file
+    to you under the Apache License, Version 2.0 (the
+    "License"); you may not use this file except in compliance
+    with the License.  You may obtain a copy of the License at
+
+..    http://www.apache.org/licenses/LICENSE-2.0
+
+..  Unless required by applicable law or agreed to in writing,
+    software distributed under the License is distributed on an
+    "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+    KIND, either express or implied.  See the License for the
+    specific language governing permissions and limitations
+    under the License.
+
+
 .. _api.series:
 
 ======
@@ -116,15 +134,18 @@ Computations / Descriptive Stats
    Series.abs
    Series.all
    Series.any
+   Series.autocorr
    Series.between
    Series.clip
    Series.corr
    Series.count
+   Series.cov
    Series.cummax
    Series.cummin
    Series.cumsum
    Series.cumprod
    Series.describe
+   Series.ewm
    Series.filter
    Series.kurt
    Series.mad
@@ -164,6 +185,7 @@ Reindexing / Selection / Label manipulation
    Series.drop
    Series.droplevel
    Series.drop_duplicates
+   Series.duplicated
    Series.equals
    Series.add_prefix
    Series.add_suffix
@@ -179,6 +201,7 @@ Reindexing / Selection / Label manipulation
    Series.reindex_like
    Series.reset_index
    Series.sample
+   Series.searchsorted
    Series.swaplevel
    Series.swapaxes
    Series.take
@@ -201,6 +224,7 @@ Missing data handling
    Series.pad
    Series.dropna
    Series.fillna
+   Series.interpolate
 
 Reshaping, sorting, transposing
 -------------------------------
@@ -235,6 +259,7 @@ Time series-related
    :toctree: api/
 
    Series.asof
+   Series.resample
    Series.shift
    Series.first_valid_index
    Series.last_valid_index

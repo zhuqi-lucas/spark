@@ -16,6 +16,7 @@
 #
 
 import unittest
+import sys
 from distutils.version import LooseVersion
 
 import pandas as pd
@@ -25,7 +26,7 @@ from pyspark.testing.pandasutils import PandasOnSparkTestCase
 from pyspark.testing.sqlutils import SQLTestUtils
 
 
-class SeriesConversionTest(PandasOnSparkTestCase, SQLTestUtils):
+class SeriesConversionTestsMixin:
     @property
     def pser(self):
         return pd.Series([1, 2, 3, 4, 5, 6, 7], name="x")
@@ -34,7 +35,10 @@ class SeriesConversionTest(PandasOnSparkTestCase, SQLTestUtils):
     def psser(self):
         return ps.from_pandas(self.pser)
 
-    @unittest.skip("Pyperclip could not find a copy/paste mechanism for Linux.")
+    @unittest.skipIf(
+        sys.platform == "linux" or sys.platform == "linux2",
+        "Pyperclip could not find a copy/paste mechanism for Linux.",
+    )
     def test_to_clipboard(self):
         pser = self.pser
         psser = self.psser
@@ -45,6 +49,10 @@ class SeriesConversionTest(PandasOnSparkTestCase, SQLTestUtils):
             psser.to_clipboard(sep=",", index=False), pser.to_clipboard(sep=",", index=False)
         )
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43458): Enable SeriesConversionTests.test_to_latex for pandas 2.0.0.",
+    )
     def test_to_latex(self):
         pser = self.pser
         psser = self.psser
@@ -58,18 +66,18 @@ class SeriesConversionTest(PandasOnSparkTestCase, SQLTestUtils):
         self.assert_eq(psser.to_latex(sparsify=False), pser.to_latex(sparsify=False))
         self.assert_eq(psser.to_latex(index_names=False), pser.to_latex(index_names=False))
         self.assert_eq(psser.to_latex(bold_rows=True), pser.to_latex(bold_rows=True))
-        # Can't specifying `encoding` without specifying `buf` as filename in pandas >= 1.0.0
-        # https://github.com/pandas-dev/pandas/blob/master/pandas/io/formats/format.py#L492-L495
-        if LooseVersion(pd.__version__) < LooseVersion("1.0.0"):
-            self.assert_eq(psser.to_latex(encoding="ascii"), pser.to_latex(encoding="ascii"))
         self.assert_eq(psser.to_latex(decimal=","), pser.to_latex(decimal=","))
+
+
+class SeriesConversionTests(SeriesConversionTestsMixin, PandasOnSparkTestCase, SQLTestUtils):
+    pass
 
 
 if __name__ == "__main__":
     from pyspark.pandas.tests.test_series_conversion import *  # noqa: F401
 
     try:
-        import xmlrunner  # type: ignore[import]
+        import xmlrunner
 
         testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
     except ImportError:

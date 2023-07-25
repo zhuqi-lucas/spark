@@ -17,7 +17,7 @@
 
 /* global $, ConvertDurationString, Mustache, createRESTEndPointForExecutorsPage */
 /* global createTemplateURI, formatBytes, formatDate, formatDuration, formatLogsCells */
-/* global getStandAloneAppId, setDataTableDefaults, uiRoot */
+/* global getStandAloneAppId, setDataTableDefaults, getBaseURI, uiRoot */
 
 var shouldBlockUI = true;
 
@@ -71,8 +71,8 @@ $.extend( $.fn.dataTable.ext.type.order, {
 // e.g. (history) https://domain:50509/history/application_1536254569791_3806251/1/stages/stage/?id=4&attempt=1
 // e.g. (proxy) https://domain:50505/proxy/application_1502220952225_59143/stages/stage?id=4&attempt=1
 function stageEndPoint(appId) {
-  var queryString = document.baseURI.split('?');
-  var words = document.baseURI.split('/');
+  var queryString = getBaseURI().split('?');
+  var words = getBaseURI().split('/');
   var indexOfProxy = words.indexOf("proxy");
   var stageId = queryString[1].split("&").filter(word => word.includes("id="))[0].split("=")[1];
   var newBaseURI;
@@ -136,8 +136,8 @@ function getColumnNameForTaskMetricSummary(columnKey) {
     case "executorDeserializeTime":
       return "Task Deserialization Time";
 
-    case "shuffleReadBlockedTime":
-      return "Shuffle Read Blocked Time";
+    case "shuffleReadFetchWaitTime":
+      return "Shuffle Read Fetch Wait Time";
 
     case "shuffleRemoteReads":
       return "Shuffle Remote Reads";
@@ -168,7 +168,7 @@ function displayRowsForSummaryMetricsTable(row, type, columnIndex) {
         row.data.readRecords[columnIndex];
       return str;
  
-    case 'shuffleReadBlockedTime':
+    case 'shuffleReadFetchWaitTime':
       str = formatDuration(row.data.fetchWaitTime[columnIndex]);
       return str;
  
@@ -235,11 +235,7 @@ function createDataTableForTaskSummaryMetricsTable(taskSummaryMetricsTable) {
         }
       ],
       "columnDefs": [
-        { "type": "duration", "targets": 1 },
-        { "type": "duration", "targets": 2 },
-        { "type": "duration", "targets": 3 },
-        { "type": "duration", "targets": 4 },
-        { "type": "duration", "targets": 5 }
+        { "type": "duration", "targets": [1, 2, 3, 4, 5] }
       ],
       "paging": false,
       "info": false,
@@ -304,7 +300,7 @@ function reselectCheckboxesBasedOnTaskTableState() {
 }
 
 function getStageAttemptId() {
-  var words = document.baseURI.split('?');
+  var words = getBaseURI().split('?');
   var digitsRegex = /[0-9]+/;
   // We are using regex here to extract the stage attempt id as there might be certain url's with format
   // like /proxy/application_1539986433979_27115/stages/stage/?id=0&attempt=0#tasksTitle
@@ -334,7 +330,7 @@ $(document).ready(function () {
     "<div id='select_all' class='select-all-checkbox-div'><input type='checkbox' class='toggle-vis' id='box-0' data-column='0'> Select All</div>" +
     "<div id='scheduler_delay' class='scheduler-delay-checkbox-div'><input type='checkbox' class='toggle-vis' id='box-11' data-column='11' data-metrics-type='task'> Scheduler Delay</div>" +
     "<div id='task_deserialization_time' class='task-deserialization-time-checkbox-div'><input type='checkbox' class='toggle-vis' id='box-12' data-column='12' data-metrics-type='task'> Task Deserialization Time</div>" +
-    "<div id='shuffle_read_blocked_time' class='shuffle-read-blocked-time-checkbox-div'><input type='checkbox' class='toggle-vis' id='box-13' data-column='13' data-metrics-type='task'> Shuffle Read Blocked Time</div>" +
+    "<div id='shuffle_read_fetch_wait_time' class='shuffle-read-fetch-wait-time-checkbox-div'><input type='checkbox' class='toggle-vis' id='box-13' data-column='13' data-metrics-type='task'> Shuffle Read Fetch Wait Time</div>" +
     "<div id='shuffle_remote_reads' class='shuffle-remote-reads-checkbox-div'><input type='checkbox' class='toggle-vis' id='box-14' data-column='14' data-metrics-type='task'> Shuffle Remote Reads</div>" +
     "<div id='shuffle_write_time' class='shuffle-write-time-checkbox-div'><input type='checkbox' class='toggle-vis' id='box-21' data-column='21' data-metrics-type='task'> Shuffle Write Time</div>" +
     "<div id='result_serialization_time' class='result-serialization-time-checkbox-div'><input type='checkbox' class='toggle-vis' id='box-15' data-column='15' data-metrics-type='task'> Result Serialization Time</div>" +
@@ -353,7 +349,7 @@ $(document).ready(function () {
   $('#task_deserialization_time').attr("data-toggle", "tooltip")
     .attr("data-placement", "top")
     .attr("title", "Time spent deserializing the task closure on the executor, including the time to read the broadcasted task.");
-  $('#shuffle_read_blocked_time').attr("data-toggle", "tooltip")
+  $('#shuffle_read_fetch_wait_time').attr("data-toggle", "tooltip")
     .attr("data-placement", "top")
     .attr("title", "Time that the task spent blocked waiting for shuffle data to be read from remote machines.");
   $('#shuffle_remote_reads').attr("data-toggle", "tooltip")
@@ -404,8 +400,8 @@ $(document).ready(function () {
   
         var responseBody = response;
         var dataToShow = {};
-        dataToShow.showInputData = responseBody.inputBytes > 0;
-        dataToShow.showOutputData = responseBody.outputBytes > 0;
+        dataToShow.showInputData = responseBody.inputBytes > 0 || responseBody.inputRecords > 0 ;
+        dataToShow.showOutputData = responseBody.outputBytes > 0 || responseBody.outputRecords > 0;
         dataToShow.showShuffleReadData = responseBody.shuffleReadBytes > 0;
         dataToShow.showShuffleWriteData = responseBody.shuffleWriteBytes > 0;
         dataToShow.showBytesSpilledData =
@@ -413,7 +409,7 @@ $(document).ready(function () {
   
         var columnIndicesToRemove = [];
         if (!dataToShow.showShuffleReadData) {
-          $('#shuffle_read_blocked_time').remove();
+          $('#shuffle_read_fetch_wait_time').remove();
           $('#shuffle_remote_reads').remove();
           columnIndicesToRemove.push(2);
           columnIndicesToRemove.push(3);
@@ -592,22 +588,16 @@ $(document).ready(function () {
                 // The targets: $id represents column id which comes from stagespage-template.html
                 // #summary-executor-table.If the relative position of the columns in the table
                 // #summary-executor-table has changed,please be careful to adjust the column index here
-                // Input Size / Records
-                {"type": "size", "targets": 9},
-                // Output Size / Records
-                {"type": "size", "targets": 10},
-                // Shuffle Read Size / Records
-                {"type": "size", "targets": 11},
-                // Shuffle Write Size / Records
-                {"type": "size", "targets": 12},
+                // Input Size / Records - 9
+                // Output Size / Records - 10
+                // Shuffle Read Size / Records - 11
+                // Shuffle Write Size / Records - 12
+                {"type": "size", "targets": [9, 10, 11, 12]},
                 // Peak JVM Memory OnHeap / OffHeap
-                {"visible": false, "targets": 15},
                 // Peak Execution Memory OnHeap / OffHeap
-                {"visible": false, "targets": 16},
                 // Peak Storage Memory OnHeap / OffHeap
-                {"visible": false, "targets": 17},
                 // Peak Pool Memory Direct / Mapped
-                {"visible": false, "targets": 18}
+                {"visible": false, "targets": executorOptionalColumns},
               ],
               "deferRender": true,
               "order": [[0, "asc"]],
@@ -652,6 +642,38 @@ $(document).ready(function () {
             executorSummaryTableSelector.column(14).visible(dataToShow.showBytesSpilledData);
           });
 
+        // Prepare data for speculation metrics
+        $("#speculationSummaryTitle").hide();
+        $("#speculationSummary").hide();
+        var speculationSummaryInfo = responseBody.speculationSummary;
+        var speculationData;
+        if(speculationSummaryInfo) {
+          speculationData = [[
+            speculationSummaryInfo.numTasks,
+            speculationSummaryInfo.numActiveTasks,
+            speculationSummaryInfo.numCompletedTasks,
+            speculationSummaryInfo.numFailedTasks,
+            speculationSummaryInfo.numKilledTasks
+          ]];
+          if (speculationSummaryInfo.numTasks > 0) {
+            // Show speculationSummary if there is atleast one speculated task that ran
+            $("#speculationSummaryTitle").show();
+            $("#speculationSummary").show();
+          }
+        }
+        var speculationMetricsTableConf = {
+          "data": speculationData,
+          "paging": false,
+          "searching": false,
+          "order": [[0, "asc"]],
+          "bSort": false,
+          "bAutoWidth": false,
+          "oLanguage": {
+            "sEmptyTable": "No speculation metrics yet"
+          }
+        }
+        $("#speculation-metrics-table").DataTable(speculationMetricsTableConf);
+
         // prepare data for accumulatorUpdates
         var accumulatorTable = responseBody.accumulatorUpdates.filter(accumUpdate =>
           !(accumUpdate.name).toString().includes("internal."));
@@ -670,7 +692,7 @@ $(document).ready(function () {
                   row1 = createRowMetadataForColumn(
                     columnKey, taskMetricsResponse[columnKey], 3);
                   row2 = createRowMetadataForColumn(
-                    "shuffleReadBlockedTime", taskMetricsResponse[columnKey], 13);
+                    "shuffleReadFetchWaitTime", taskMetricsResponse[columnKey], 13);
                   row3 = createRowMetadataForColumn(
                     "shuffleRemoteReads", taskMetricsResponse[columnKey], 14);
                   if (dataToShow.showShuffleReadData) {
@@ -886,7 +908,7 @@ $(document).ready(function () {
                   return "";
                 }
               },
-              name: "Shuffle Read Blocked Time"
+              name: "Shuffle Read Fetch Wait Time"
             },
             {
               data : function (row, type) {
@@ -944,7 +966,7 @@ $(document).ready(function () {
             },
             {
               data : function (row, type) {
-                if (row.taskMetrics && row.taskMetrics.inputMetrics && row.taskMetrics.inputMetrics.bytesRead > 0) {
+                if (row.taskMetrics && row.taskMetrics.inputMetrics && (row.taskMetrics.inputMetrics.bytesRead > 0 || row.taskMetrics.inputMetrics.recordsRead > 0)) {
                   if (type === 'display') {
                     return formatBytes(row.taskMetrics.inputMetrics.bytesRead, type) + " / " + row.taskMetrics.inputMetrics.recordsRead;
                   } else {
@@ -958,7 +980,7 @@ $(document).ready(function () {
             },
             {
               data : function (row, type) {
-                if (row.taskMetrics && row.taskMetrics.outputMetrics && row.taskMetrics.outputMetrics.bytesWritten > 0) {
+                if (row.taskMetrics && row.taskMetrics.outputMetrics && (row.taskMetrics.outputMetrics.bytesWritten > 0 || row.taskMetrics.outputMetrics.recordsWritten > 0)) {
                   if (type === 'display') {
                     return formatBytes(row.taskMetrics.outputMetrics.bytesWritten, type) + " / " + row.taskMetrics.outputMetrics.recordsWritten;
                   } else {
@@ -1047,15 +1069,8 @@ $(document).ready(function () {
             }
           ],
           "columnDefs": [
-            { "visible": false, "targets": 11 },
-            { "visible": false, "targets": 12 },
-            { "visible": false, "targets": 13 },
-            { "visible": false, "targets": 14 },
-            { "visible": false, "targets": 15 },
-            { "visible": false, "targets": 16 },
-            { "visible": false, "targets": 17 },
-            { "visible": false, "targets": 18 },
-            { "visible": false, "targets": 21 }
+            { "visible": false, "targets": optionalColumns },
+            { "visible": false, "targets": 18 }, // accumulators
           ],
           "deferRender": true
         };

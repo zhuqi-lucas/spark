@@ -18,6 +18,7 @@
 package org.apache.spark.serializer
 
 import java.io._
+import java.lang.invoke.SerializedLambda
 import java.nio.ByteBuffer
 import java.util.Locale
 import javax.annotation.Nullable
@@ -25,6 +26,7 @@ import javax.annotation.Nullable
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
+import scala.util.Properties
 import scala.util.control.NonFatal
 
 import com.esotericsoftware.kryo.{Kryo, KryoException, Serializer => KryoClassSerializer}
@@ -44,8 +46,9 @@ import org.apache.spark.internal.io.FileCommitProtocol._
 import org.apache.spark.network.util.ByteUnit
 import org.apache.spark.scheduler.{CompressedMapStatus, HighlyCompressedMapStatus}
 import org.apache.spark.storage._
-import org.apache.spark.util.{BoundedPriorityQueue, ByteBufferInputStream, SerializableConfiguration, SerializableJobConf, Utils}
-import org.apache.spark.util.collection.CompactBuffer
+import org.apache.spark.util.{BoundedPriorityQueue, ByteBufferInputStream, NextIterator, SerializableConfiguration, SerializableJobConf, Utils}
+import org.apache.spark.util.collection.{BitSet, CompactBuffer}
+import org.apache.spark.util.io.ChunkedByteBuffer
 
 /**
  * A Spark serializer that uses the <a href="https://code.google.com/p/kryo/">
@@ -217,9 +220,15 @@ class KryoSerializer(conf: SparkConf)
 
     kryo.register(None.getClass)
     kryo.register(Nil.getClass)
+    if (Properties.versionNumberString.startsWith("2.13")) {
+      kryo.register(Utils.classForName("scala.collection.immutable.ArraySeq$ofRef"))
+    }
     kryo.register(Utils.classForName("scala.collection.immutable.$colon$colon"))
     kryo.register(Utils.classForName("scala.collection.immutable.Map$EmptyMap$"))
+    kryo.register(Utils.classForName("scala.math.Ordering$Reverse"))
+    kryo.register(Utils.classForName("scala.reflect.ClassTag$GenericClassTag"))
     kryo.register(classOf[ArrayBuffer[Any]])
+    kryo.register(classOf[Array[Array[Byte]]])
 
     // We can't load those class directly in order to avoid unnecessary jar dependencies.
     // We load them safely, ignore it if the class not found.
@@ -301,6 +310,16 @@ class KryoDeserializationStream(
 
   private[this] var kryo: Kryo = serInstance.borrowKryo()
 
+  private[this] def hasNext: Boolean = {
+    if (input == null) {
+      return false
+    }
+
+    val eof = input.eof()
+    if (eof) close()
+    !eof
+  }
+
   override def readObject[T: ClassTag](): T = {
     try {
       kryo.readClassAndObject(input).asInstanceOf[T]
@@ -322,6 +341,42 @@ class KryoDeserializationStream(
         kryo = null
         input = null
       }
+    }
+  }
+
+  final override def asIterator: Iterator[Any] = new NextIterator[Any] {
+    override protected def getNext(): Any = {
+      if (KryoDeserializationStream.this.hasNext) {
+        try {
+          return readObject[Any]()
+        } catch {
+          case eof: EOFException =>
+        }
+      }
+      finished = true
+      null
+    }
+
+    override protected def close(): Unit = {
+      KryoDeserializationStream.this.close()
+    }
+  }
+
+  final override def asKeyValueIterator: Iterator[(Any, Any)] = new NextIterator[(Any, Any)] {
+    override protected def getNext(): (Any, Any) = {
+      if (KryoDeserializationStream.this.hasNext) {
+        try {
+          return (readKey[Any](), readValue[Any]())
+        } catch {
+          case eof: EOFException =>
+        }
+      }
+      finished = true
+      null
+    }
+
+    override protected def close(): Unit = {
+      KryoDeserializationStream.this.close()
     }
   }
 }
@@ -464,9 +519,11 @@ private[serializer] object KryoSerializer {
   // Commonly used classes.
   private val toRegister: Seq[Class[_]] = Seq(
     ByteBuffer.allocate(1).getClass,
+    classOf[Array[ByteBuffer]],
     classOf[StorageLevel],
     classOf[CompressedMapStatus],
     classOf[HighlyCompressedMapStatus],
+    classOf[ChunkedByteBuffer],
     classOf[CompactBuffer[_]],
     classOf[BlockManagerId],
     classOf[Array[Boolean]],
@@ -481,7 +538,9 @@ private[serializer] object KryoSerializer {
     classOf[Array[Array[String]]],
     classOf[BoundedPriorityQueue[_]],
     classOf[SparkConf],
-    classOf[TaskCommitMessage]
+    classOf[TaskCommitMessage],
+    classOf[SerializedLambda],
+    classOf[BitSet]
   )
 
   private val toRegisterSerializer = Map[Class[_], KryoClassSerializer[_]](
@@ -501,9 +560,43 @@ private[serializer] object KryoSerializer {
   // SQL / ML / MLlib classes once and then re-use that filtered list in newInstance() calls.
   private lazy val loadableSparkClasses: Seq[Class[_]] = {
     Seq(
+      "org.apache.spark.sql.catalyst.expressions.BoundReference",
+      "org.apache.spark.sql.catalyst.expressions.SortOrder",
+      "[Lorg.apache.spark.sql.catalyst.expressions.SortOrder;",
+      "org.apache.spark.sql.catalyst.InternalRow",
+      "org.apache.spark.sql.catalyst.InternalRow$",
+      "[Lorg.apache.spark.sql.catalyst.InternalRow;",
       "org.apache.spark.sql.catalyst.expressions.UnsafeRow",
       "org.apache.spark.sql.catalyst.expressions.UnsafeArrayData",
       "org.apache.spark.sql.catalyst.expressions.UnsafeMapData",
+      "org.apache.spark.sql.catalyst.expressions.codegen.LazilyGeneratedOrdering",
+      "org.apache.spark.sql.catalyst.expressions.Ascending$",
+      "org.apache.spark.sql.catalyst.expressions.NullsFirst$",
+      "org.apache.spark.sql.catalyst.trees.Origin",
+      "org.apache.spark.sql.types.IntegerType",
+      "org.apache.spark.sql.types.IntegerType$",
+      "org.apache.spark.sql.types.LongType$",
+      "org.apache.spark.sql.types.DoubleType",
+      "org.apache.spark.sql.types.DoubleType$",
+      "org.apache.spark.sql.types.Metadata",
+      "org.apache.spark.sql.types.StringType$",
+      "org.apache.spark.sql.types.StructField",
+      "[Lorg.apache.spark.sql.types.StructField;",
+      "org.apache.spark.sql.types.StructType",
+      "[Lorg.apache.spark.sql.types.StructType;",
+      "org.apache.spark.sql.types.DateType$",
+      "org.apache.spark.sql.types.DecimalType",
+      "org.apache.spark.sql.types.Decimal$DecimalAsIfIntegral$",
+      "org.apache.spark.sql.types.Decimal$DecimalIsFractional$",
+      "org.apache.spark.sql.execution.command.PartitionStatistics",
+      "org.apache.spark.sql.execution.datasources.BasicWriteTaskStats",
+      "org.apache.spark.sql.execution.datasources.ExecutedWriteSummary",
+      "org.apache.spark.sql.execution.datasources.WriteTaskResult",
+      "org.apache.spark.sql.execution.datasources.v2.DataWritingSparkTaskResult",
+      "org.apache.spark.sql.execution.joins.EmptyHashedRelation$",
+      "org.apache.spark.sql.execution.joins.LongHashedRelation",
+      "org.apache.spark.sql.execution.joins.LongToUnsafeRowMap",
+      "org.apache.spark.sql.execution.joins.UnsafeHashedRelation",
 
       "org.apache.spark.ml.attribute.Attribute",
       "org.apache.spark.ml.attribute.AttributeGroup",

@@ -29,7 +29,6 @@ import com.codahale.metrics.Gauge
 import com.google.common.io.Files
 import org.mockito.ArgumentMatchers.{any, eq => meq}
 import org.mockito.Mockito.{mock, spy, verify, when}
-import org.scalatest.BeforeAndAfterEach
 import org.scalatest.concurrent.Eventually.{eventually, interval, timeout}
 
 import org.apache.spark._
@@ -42,7 +41,7 @@ import org.apache.spark.resource.ResourceUtils.GPU
 import org.apache.spark.resource.TestResourceIDs.{DRIVER_GPU_ID, EXECUTOR_GPU_ID, WORKER_GPU_ID}
 import org.apache.spark.util.Utils
 
-class PluginContainerSuite extends SparkFunSuite with BeforeAndAfterEach with LocalSparkContext {
+class PluginContainerSuite extends SparkFunSuite with LocalSparkContext {
 
   override def afterEach(): Unit = {
     TestSparkPlugin.reset()
@@ -308,14 +307,14 @@ class TestSparkPlugin extends SparkPlugin {
   override def driverPlugin(): DriverPlugin = {
     val p = new TestDriverPlugin()
     require(TestSparkPlugin.driverPlugin == null, "Driver plugin already initialized.")
-    TestSparkPlugin.driverPlugin = spy(p)
+    TestSparkPlugin.driverPlugin = spy[TestDriverPlugin](p)
     TestSparkPlugin.driverPlugin
   }
 
   override def executorPlugin(): ExecutorPlugin = {
     val p = new TestExecutorPlugin()
     require(TestSparkPlugin.executorPlugin == null, "Executor plugin already initialized.")
-    TestSparkPlugin.executorPlugin = spy(p)
+    TestSparkPlugin.executorPlugin = spy[TestExecutorPlugin](p)
     TestSparkPlugin.executorPlugin
   }
 

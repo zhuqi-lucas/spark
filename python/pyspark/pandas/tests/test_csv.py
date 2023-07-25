@@ -18,7 +18,9 @@
 import os
 import shutil
 import tempfile
+import unittest
 from contextlib import contextmanager
+from distutils.version import LooseVersion
 
 import pandas as pd
 import numpy as np
@@ -31,9 +33,9 @@ def normalize_text(s):
     return "\n".join(map(str.strip, s.strip().split("\n")))
 
 
-class CsvTest(PandasOnSparkTestCase, TestUtils):
+class CsvTestsMixin:
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix=CsvTest.__name__)
+        self.tmp_dir = tempfile.mkdtemp(prefix=CsvTests.__name__)
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -157,6 +159,7 @@ class CsvTest(PandasOnSparkTestCase, TestUtils):
             check(index_col=["amount"])
             check(header=None, index_col=[1])
             check(names=["n", "a"], index_col=["a"])
+            check(names=["n", "a"], index_col="a")
 
             # check with pyspark patch.
             expected = pd.read_csv(fn)
@@ -239,12 +242,23 @@ class CsvTest(PandasOnSparkTestCase, TestUtils):
             actual = ps.read_csv(fn, comment="#", nrows=2)
             self.assert_eq(expected, actual, almost=True)
 
+    def test_read_csv_with_encoding(self):
+        # SPARK-37181: Read csv supporting latin-1 encoding.
+        with self.csv_file(self.csv_text) as fn:
+            expected = pd.read_csv(fn, encoding="latin-1")
+            actual = ps.read_csv(fn, encoding="latin-1")
+            self.assert_eq(expected, actual, almost=True)
+
     def test_read_csv_with_sep(self):
         with self.csv_file(self.tab_delimited_csv_text) as fn:
             expected = pd.read_csv(fn, sep="\t")
             actual = ps.read_csv(fn, sep="\t")
             self.assert_eq(expected, actual, almost=True)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43563): Enable CsvTests.test_read_csv_with_squeeze for pandas 2.0.0.",
+    )
     def test_read_csv_with_squeeze(self):
         with self.csv_file(self.csv_text) as fn:
             expected = pd.read_csv(fn, squeeze=True, usecols=["name"])
@@ -422,12 +436,16 @@ class CsvTest(PandasOnSparkTestCase, TestUtils):
                 self.assertEqual(f.read(), expected)
 
 
+class CsvTests(CsvTestsMixin, PandasOnSparkTestCase, TestUtils):
+    pass
+
+
 if __name__ == "__main__":
     import unittest
     from pyspark.pandas.tests.test_csv import *  # noqa: F401
 
     try:
-        import xmlrunner  # type: ignore[import]
+        import xmlrunner
 
         testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
     except ImportError:

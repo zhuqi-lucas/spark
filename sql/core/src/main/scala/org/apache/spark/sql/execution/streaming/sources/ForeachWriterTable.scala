@@ -19,12 +19,11 @@ package org.apache.spark.sql.execution.streaming.sources
 
 import java.util
 
-import scala.collection.JavaConverters._
-
 import org.apache.spark.sql.{ForeachWriter, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow
+import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
 import org.apache.spark.sql.connector.catalog.{SupportsWrite, Table, TableCapability}
 import org.apache.spark.sql.connector.write.{DataWriter, LogicalWriteInfo, PhysicalWriteInfo, SupportsTruncate, Write, WriteBuilder, WriterCommitMessage}
 import org.apache.spark.sql.connector.write.streaming.{StreamingDataWriterFactory, StreamingWrite}
@@ -51,7 +50,7 @@ case class ForeachWriterTable[T](
   override def schema(): StructType = StructType(Nil)
 
   override def capabilities(): util.Set[TableCapability] = {
-    Set(TableCapability.STREAMING_WRITE).asJava
+    util.EnumSet.of(TableCapability.STREAMING_WRITE)
   }
 
   override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder = {
@@ -83,7 +82,7 @@ class ForeachWrite[T](
         val rowConverter: InternalRow => T = converter match {
           case Left(enc) =>
             val boundEnc = enc.resolveAndBind(
-              inputSchema.toAttributes,
+              toAttributes(inputSchema),
               SparkSession.getActiveSession.get.sessionState.analyzer)
             boundEnc.createDeserializer()
           case Right(func) =>

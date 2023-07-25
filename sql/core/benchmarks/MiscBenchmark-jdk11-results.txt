@@ -2,126 +2,126 @@
 filter & aggregate without group
 ================================================================================================
 
-OpenJDK 64-Bit Server VM 11.0.10+9-LTS on Linux 5.4.0-1043-azure
+OpenJDK 64-Bit Server VM 11.0.18+10 on Linux 5.15.0-1031-azure
 Intel(R) Xeon(R) Platinum 8171M CPU @ 2.60GHz
 range/filter/sum:                         Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-range/filter/sum wholestage off                  116300         116850         778         18.0          55.5       1.0X
-range/filter/sum wholestage on                     4137           4321         381        507.0           2.0      28.1X
+range/filter/sum wholestage off                   78970          79145         248         26.6          37.7       1.0X
+range/filter/sum wholestage on                     3378           3751         224        620.8           1.6      23.4X
 
 
 ================================================================================================
 range/limit/sum
 ================================================================================================
 
-OpenJDK 64-Bit Server VM 11.0.10+9-LTS on Linux 5.4.0-1043-azure
+OpenJDK 64-Bit Server VM 11.0.18+10 on Linux 5.15.0-1031-azure
 Intel(R) Xeon(R) Platinum 8171M CPU @ 2.60GHz
 range/limit/sum:                          Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-range/limit/sum wholestage off                      198            200           3       2642.7           0.4       1.0X
-range/limit/sum wholestage on                        46             66          36      11475.6           0.1       4.3X
+range/limit/sum wholestage off                      201            263          89       2613.1           0.4       1.0X
+range/limit/sum wholestage on                        83             96          16       6280.1           0.2       2.4X
 
 
 ================================================================================================
 sample
 ================================================================================================
 
-OpenJDK 64-Bit Server VM 11.0.10+9-LTS on Linux 5.4.0-1043-azure
+OpenJDK 64-Bit Server VM 11.0.18+10 on Linux 5.15.0-1031-azure
 Intel(R) Xeon(R) Platinum 8171M CPU @ 2.60GHz
 sample with replacement:                  Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-sample with replacement wholestage off            17080          17302         314          7.7         130.3       1.0X
-sample with replacement wholestage on              8033           8188         101         16.3          61.3       2.1X
+sample with replacement wholestage off            14452          14462          14          9.1         110.3       1.0X
+sample with replacement wholestage on              7786           8024         193         16.8          59.4       1.9X
 
-OpenJDK 64-Bit Server VM 11.0.10+9-LTS on Linux 5.4.0-1043-azure
+OpenJDK 64-Bit Server VM 11.0.18+10 on Linux 5.15.0-1031-azure
 Intel(R) Xeon(R) Platinum 8171M CPU @ 2.60GHz
 sample without replacement:                Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 -------------------------------------------------------------------------------------------------------------------------
-sample without replacement wholestage off           5087           5115          38         25.8          38.8       1.0X
-sample without replacement wholestage on            1064           1084          25        123.2           8.1       4.8X
+sample without replacement wholestage off           2802           2875         102         46.8          21.4       1.0X
+sample without replacement wholestage on            1105           1148          43        118.7           8.4       2.5X
 
 
 ================================================================================================
 collect
 ================================================================================================
 
-OpenJDK 64-Bit Server VM 11.0.10+9-LTS on Linux 5.4.0-1043-azure
+OpenJDK 64-Bit Server VM 11.0.18+10 on Linux 5.15.0-1031-azure
 Intel(R) Xeon(R) Platinum 8171M CPU @ 2.60GHz
 collect:                                  Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-collect 1 million                                   391            462          85          2.7         372.8       1.0X
-collect 2 millions                                  789            910         130          1.3         752.1       0.5X
-collect 4 millions                                 1677           1729          75          0.6        1599.0       0.2X
+collect 1 million                                   452            608         176          2.3         431.2       1.0X
+collect 2 millions                                  852            974         109          1.2         812.8       0.5X
+collect 4 millions                                 1961           1963           2          0.5        1870.0       0.2X
 
 
 ================================================================================================
 collect limit
 ================================================================================================
 
-OpenJDK 64-Bit Server VM 11.0.10+9-LTS on Linux 5.4.0-1043-azure
+OpenJDK 64-Bit Server VM 11.0.18+10 on Linux 5.15.0-1031-azure
 Intel(R) Xeon(R) Platinum 8171M CPU @ 2.60GHz
 collect limit:                            Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-collect limit 1 million                             507            545          28          2.1         483.4       1.0X
-collect limit 2 millions                            854           1003         212          1.2         814.1       0.6X
+collect limit 1 million                             495            562          47          2.1         471.8       1.0X
+collect limit 2 millions                           1020           1034          20          1.0         972.3       0.5X
 
 
 ================================================================================================
 generate explode
 ================================================================================================
 
-OpenJDK 64-Bit Server VM 11.0.10+9-LTS on Linux 5.4.0-1043-azure
+OpenJDK 64-Bit Server VM 11.0.18+10 on Linux 5.15.0-1031-azure
 Intel(R) Xeon(R) Platinum 8171M CPU @ 2.60GHz
 generate explode array:                   Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-generate explode array wholestage off             20533          20699         235          0.8        1223.9       1.0X
-generate explode array wholestage on               5886           6012         109          2.9         350.8       3.5X
+generate explode array wholestage off             15439          15714         390          1.1         920.2       1.0X
+generate explode array wholestage on               5915           6424         361          2.8         352.5       2.6X
 
-OpenJDK 64-Bit Server VM 11.0.10+9-LTS on Linux 5.4.0-1043-azure
+OpenJDK 64-Bit Server VM 11.0.18+10 on Linux 5.15.0-1031-azure
 Intel(R) Xeon(R) Platinum 8171M CPU @ 2.60GHz
 generate explode map:                     Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-generate explode map wholestage off               62142          63593        2052          0.3        3703.9       1.0X
-generate explode map wholestage on                38943          39253         439          0.4        2321.2       1.6X
+generate explode map wholestage off               51361          51563         285          0.3        3061.3       1.0X
+generate explode map wholestage on                36438          36747         229          0.5        2171.9       1.4X
 
-OpenJDK 64-Bit Server VM 11.0.10+9-LTS on Linux 5.4.0-1043-azure
+OpenJDK 64-Bit Server VM 11.0.18+10 on Linux 5.15.0-1031-azure
 Intel(R) Xeon(R) Platinum 8171M CPU @ 2.60GHz
 generate posexplode array:                Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-generate posexplode array wholestage off          26931          27169         335          0.6        1605.2       1.0X
-generate posexplode array wholestage on            6003           6107          64          2.8         357.8       4.5X
+generate posexplode array wholestage off          16889          16979         128          1.0        1006.7       1.0X
+generate posexplode array wholestage on            6951           7075         116          2.4         414.3       2.4X
 
-OpenJDK 64-Bit Server VM 11.0.10+9-LTS on Linux 5.4.0-1043-azure
+OpenJDK 64-Bit Server VM 11.0.18+10 on Linux 5.15.0-1031-azure
 Intel(R) Xeon(R) Platinum 8171M CPU @ 2.60GHz
 generate inline array:                    Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-generate inline array wholestage off              19043          19081          55          0.9        1135.0       1.0X
-generate inline array wholestage on                4648           4778         158          3.6         277.0       4.1X
+generate inline array wholestage off              12538          12682         203          1.3         747.3       1.0X
+generate inline array wholestage on                5242           5350          66          3.2         312.5       2.4X
 
-OpenJDK 64-Bit Server VM 11.0.10+9-LTS on Linux 5.4.0-1043-azure
+OpenJDK 64-Bit Server VM 11.0.18+10 on Linux 5.15.0-1031-azure
 Intel(R) Xeon(R) Platinum 8171M CPU @ 2.60GHz
 generate big struct array:                Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-generate big struct array wholestage off            486            496          15          0.1        8094.8       1.0X
-generate big struct array wholestage on             396            420          22          0.2        6603.2       1.2X
+generate big struct array wholestage off            502            813         440          0.1        8369.2       1.0X
+generate big struct array wholestage on             434            502          85          0.1        7236.5       1.2X
 
-OpenJDK 64-Bit Server VM 11.0.10+9-LTS on Linux 5.4.0-1043-azure
+OpenJDK 64-Bit Server VM 11.0.18+10 on Linux 5.15.0-1031-azure
 Intel(R) Xeon(R) Platinum 8171M CPU @ 2.60GHz
 generate big nested struct array:                Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 -------------------------------------------------------------------------------------------------------------------------------
-generate big nested struct array wholestage off         327380         353982         NaN          0.0     5456328.8       1.0X
-generate big nested struct array wholestage on             391            427          66          0.2        6524.4     836.3X
+generate big nested struct array wholestage off         384809         385525        1012          0.0     6413482.6       1.0X
+generate big nested struct array wholestage on             421            458          52          0.1        7023.2     913.2X
 
 
 ================================================================================================
 generate regular generator
 ================================================================================================
 
-OpenJDK 64-Bit Server VM 11.0.10+9-LTS on Linux 5.4.0-1043-azure
+OpenJDK 64-Bit Server VM 11.0.18+10 on Linux 5.15.0-1031-azure
 Intel(R) Xeon(R) Platinum 8171M CPU @ 2.60GHz
 generate stack:                           Best Time(ms)   Avg Time(ms)   Stdev(ms)    Rate(M/s)   Per Row(ns)   Relative
 ------------------------------------------------------------------------------------------------------------------------
-generate stack wholestage off                     31236          31274          54          0.5        1861.8       1.0X
-generate stack wholestage on                       6420           6496         113          2.6         382.7       4.9X
+generate stack wholestage off                     20912          21118         291          0.8        1246.5       1.0X
+generate stack wholestage on                       7056           7229         117          2.4         420.6       3.0X
 
 

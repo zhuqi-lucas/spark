@@ -17,6 +17,7 @@
 
 import datetime
 import unittest
+from distutils.version import LooseVersion
 
 import numpy as np
 import pandas as pd
@@ -26,7 +27,7 @@ from pyspark.testing.pandasutils import PandasOnSparkTestCase
 from pyspark.testing.sqlutils import SQLTestUtils
 
 
-class SeriesDateTimeTest(PandasOnSparkTestCase, SQLTestUtils):
+class SeriesDateTimeTestsMixin:
     @property
     def pdf1(self):
         date1 = pd.Series(pd.date_range("2012-1-1 12:45:31", periods=3, freq="M"))
@@ -44,29 +45,31 @@ class SeriesDateTimeTest(PandasOnSparkTestCase, SQLTestUtils):
     def check_func(self, func):
         self.assert_eq(func(self.ks_start_date), func(self.pd_start_date))
 
+    @unittest.skip(
+        "Those fail in certain OSs presumably due to different"
+        "timezone behaviours inherited from C library."
+    )
     def test_timestamp_subtraction(self):
         pdf = self.pdf1
         psdf = ps.from_pandas(pdf)
 
-        # Those fail in certain OSs presumably due to different
-        # timezone behaviours inherited from C library.
-
-        actual = (psdf["end_date"] - psdf["start_date"] - 1).to_pandas()
+        actual = (psdf["end_date"] - psdf["start_date"] - 1)._to_pandas()
         expected = (pdf["end_date"] - pdf["start_date"]) // np.timedelta64(1, "s") - 1
-        # self.assert_eq(actual, expected)
+        self.assert_eq(actual, expected)
 
-        actual = (psdf["end_date"] - pd.Timestamp("2012-1-1 12:45:31") - 1).to_pandas()
+        actual = (psdf["end_date"] - pd.Timestamp("2012-1-1 12:45:31") - 1)._to_pandas()
         expected = (pdf["end_date"] - pd.Timestamp("2012-1-1 12:45:31")) // np.timedelta64(
             1, "s"
         ) - 1
-        # self.assert_eq(actual, expected)
+        self.assert_eq(actual, expected)
 
-        actual = (pd.Timestamp("2013-3-11 21:45:00") - psdf["start_date"] - 1).to_pandas()
+        actual = (pd.Timestamp("2013-3-11 21:45:00") - psdf["start_date"] - 1)._to_pandas()
         expected = (pd.Timestamp("2013-3-11 21:45:00") - pdf["start_date"]) // np.timedelta64(
             1, "s"
         ) - 1
-        # self.assert_eq(actual, expected)
+        self.assert_eq(actual, expected)
 
+    def test_timestamp_subtraction_errors(self):
         psdf = ps.DataFrame(
             {"a": pd.date_range("2016-12-31", "2017-01-08", freq="D"), "b": pd.Series(range(9))}
         )
@@ -113,6 +116,10 @@ class SeriesDateTimeTest(PandasOnSparkTestCase, SQLTestUtils):
         self.assertRaisesRegex(TypeError, expected_err_msg, lambda: psser - other)
         self.assertRaises(NotImplementedError, lambda: py_datetime - psser)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43462): Enable SeriesDateTimeTests.test_date_subtraction for pandas 2.0.0.",
+    )
     def test_date_subtraction(self):
         pdf = self.pdf1
         psdf = ps.from_pandas(pdf)
@@ -169,24 +176,52 @@ class SeriesDateTimeTest(PandasOnSparkTestCase, SQLTestUtils):
         with self.assertRaises(NotImplementedError):
             self.check_func(lambda x: x.dt.timetz)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43736): Enable SeriesDateTimeTests.test_year for pandas 2.0.0.",
+    )
     def test_year(self):
         self.check_func(lambda x: x.dt.year)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43731): Enable SeriesDateTimeTests.test_month for pandas 2.0.0.",
+    )
     def test_month(self):
         self.check_func(lambda x: x.dt.month)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43722): Enable SeriesDateTimeTests.test_day for pandas 2.0.0.",
+    )
     def test_day(self):
         self.check_func(lambda x: x.dt.day)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43728): Enable SeriesDateTimeTests.test_hour for pandas 2.0.0.",
+    )
     def test_hour(self):
         self.check_func(lambda x: x.dt.hour)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43730): Enable SeriesDateTimeTests.test_minute for pandas 2.0.0.",
+    )
     def test_minute(self):
         self.check_func(lambda x: x.dt.minute)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43733): Enable SeriesDateTimeTests.test_second for pandas 2.0.0.",
+    )
     def test_second(self):
         self.check_func(lambda x: x.dt.second)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43729): Enable SeriesDateTimeTests.test_microsecond for pandas 2.0.0.",
+    )
     def test_microsecond(self):
         self.check_func(lambda x: x.dt.microsecond)
 
@@ -194,23 +229,47 @@ class SeriesDateTimeTest(PandasOnSparkTestCase, SQLTestUtils):
         with self.assertRaises(NotImplementedError):
             self.check_func(lambda x: x.dt.nanosecond)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-42617): Support `isocalendar`",
+    )
     def test_week(self):
         self.check_func(lambda x: x.dt.week)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-42617): Support `isocalendar`",
+    )
     def test_weekofyear(self):
         self.check_func(lambda x: x.dt.weekofyear)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43723): Enable SeriesDateTimeTests.test_dayofweek for pandas 2.0.0.",
+    )
     def test_dayofweek(self):
         self.check_func(lambda x: x.dt.dayofweek)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43735): Enable SeriesDateTimeTests.test_weekday for pandas 2.0.0.",
+    )
     def test_weekday(self):
         self.check_func(lambda x: x.dt.weekday)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43724): Enable SeriesDateTimeTests.test_dayofyear for pandas 2.0.0.",
+    )
     def test_dayofyear(self):
         self.check_func(lambda x: x.dt.dayofyear)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43732): Enable SeriesDateTimeTests.test_quarter for pandas 2.0.0.",
+    )
     def test_quarter(self):
-        self.check_func(lambda x: x.dt.dayofyear)
+        self.check_func(lambda x: x.dt.quarter)
 
     def test_is_month_start(self):
         self.check_func(lambda x: x.dt.is_month_start)
@@ -233,9 +292,17 @@ class SeriesDateTimeTest(PandasOnSparkTestCase, SQLTestUtils):
     def test_is_leap_year(self):
         self.check_func(lambda x: x.dt.is_leap_year)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43726): Enable SeriesDateTimeTests.test_daysinmonth for pandas 2.0.0.",
+    )
     def test_daysinmonth(self):
         self.check_func(lambda x: x.dt.daysinmonth)
 
+    @unittest.skipIf(
+        LooseVersion(pd.__version__) >= LooseVersion("2.0.0"),
+        "TODO(SPARK-43725): Enable SeriesDateTimeTests.test_days_in_month for pandas 2.0.0.",
+    )
     def test_days_in_month(self):
         self.check_func(lambda x: x.dt.days_in_month)
 
@@ -262,8 +329,8 @@ class SeriesDateTimeTest(PandasOnSparkTestCase, SQLTestUtils):
         self.check_func(lambda x: x.dt.floor(freq="H"))
 
     def test_ceil(self):
-        self.check_func(lambda x: x.dt.floor(freq="min"))
-        self.check_func(lambda x: x.dt.floor(freq="H"))
+        self.check_func(lambda x: x.dt.ceil(freq="min"))
+        self.check_func(lambda x: x.dt.ceil(freq="H"))
 
     @unittest.skip("Unsupported locale setting")
     def test_month_name(self):
@@ -281,11 +348,15 @@ class SeriesDateTimeTest(PandasOnSparkTestCase, SQLTestUtils):
         )
 
 
+class SeriesDateTimeTests(SeriesDateTimeTestsMixin, PandasOnSparkTestCase, SQLTestUtils):
+    pass
+
+
 if __name__ == "__main__":
     from pyspark.pandas.tests.test_series_datetime import *  # noqa: F401
 
     try:
-        import xmlrunner  # type: ignore[import]
+        import xmlrunner
 
         testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
     except ImportError:

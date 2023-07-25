@@ -31,7 +31,7 @@ import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.expressions.codegen.Block._
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.execution.aggregate.HashAggregateExec
+import org.apache.spark.sql.execution.aggregate.{HashAggregateExec, SortAggregateExec}
 import org.apache.spark.sql.execution.columnar.InMemoryTableScanExec
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, BroadcastNestedLoopJoinExec, ShuffledHashJoinExec, SortMergeJoinExec}
 import org.apache.spark.sql.execution.metric.SQLMetrics
@@ -47,7 +47,8 @@ trait CodegenSupport extends SparkPlan {
 
   /** Prefix used in the current operator's variable names. */
   private def variablePrefix: String = this match {
-    case _: HashAggregateExec => "agg"
+    case _: HashAggregateExec => "hashAgg"
+    case _: SortAggregateExec => "sortAgg"
     case _: BroadcastHashJoinExec => "bhj"
     case _: ShuffledHashJoinExec => "shj"
     case _: SortMergeJoinExec => "smj"
@@ -533,7 +534,7 @@ case class InputAdapter(child: SparkPlan) extends UnaryExecNode with InputRDDCod
 
   override def generateTreeString(
       depth: Int,
-      lastChildren: Seq[Boolean],
+      lastChildren: java.util.ArrayList[Boolean],
       append: String => Unit,
       verbose: Boolean,
       prefix: String = "",
@@ -749,37 +750,29 @@ case class WholeStageCodegenExec(child: SparkPlan)(val codegenStageId: Int)
     // but the output must be rows.
     val rdds = child.asInstanceOf[CodegenSupport].inputRDDs()
     assert(rdds.size <= 2, "Up to two input RDDs can be supported")
+    val evaluatorFactory = new WholeStageCodegenEvaluatorFactory(
+      cleanedSource, durationMs, references)
     if (rdds.length == 1) {
-      rdds.head.mapPartitionsWithIndex { (index, iter) =>
-        val (clazz, _) = CodeGenerator.compile(cleanedSource)
-        val buffer = clazz.generate(references).asInstanceOf[BufferedRowIterator]
-        buffer.init(index, Array(iter))
-        new Iterator[InternalRow] {
-          override def hasNext: Boolean = {
-            val v = buffer.hasNext
-            if (!v) durationMs += buffer.durationMs()
-            v
-          }
-          override def next: InternalRow = buffer.next()
+      if (conf.usePartitionEvaluator) {
+        rdds.head.mapPartitionsWithEvaluator(evaluatorFactory)
+      } else {
+        rdds.head.mapPartitionsWithIndex { (index, iter) =>
+          val evaluator = evaluatorFactory.createEvaluator()
+          evaluator.eval(index, iter)
         }
       }
     } else {
       // Right now, we support up to two input RDDs.
-      rdds.head.zipPartitions(rdds(1)) { (leftIter, rightIter) =>
-        Iterator((leftIter, rightIter))
-        // a small hack to obtain the correct partition index
-      }.mapPartitionsWithIndex { (index, zippedIter) =>
-        val (leftIter, rightIter) = zippedIter.next()
-        val (clazz, _) = CodeGenerator.compile(cleanedSource)
-        val buffer = clazz.generate(references).asInstanceOf[BufferedRowIterator]
-        buffer.init(index, Array(leftIter, rightIter))
-        new Iterator[InternalRow] {
-          override def hasNext: Boolean = {
-            val v = buffer.hasNext
-            if (!v) durationMs += buffer.durationMs()
-            v
-          }
-          override def next: InternalRow = buffer.next()
+      if (conf.usePartitionEvaluator) {
+        rdds.head.zipPartitionsWithEvaluator(rdds(1), evaluatorFactory)
+      } else {
+        rdds.head.zipPartitions(rdds(1)) { (leftIter, rightIter) =>
+          Iterator((leftIter, rightIter))
+          // a small hack to obtain the correct partition index
+        }.mapPartitionsWithIndex { (index, zippedIter) =>
+          val (leftIter, rightIter) = zippedIter.next()
+          val evaluator = evaluatorFactory.createEvaluator()
+          evaluator.eval(index, leftIter, rightIter)
         }
       }
     }
@@ -807,7 +800,7 @@ case class WholeStageCodegenExec(child: SparkPlan)(val codegenStageId: Int)
 
   override def generateTreeString(
       depth: Int,
-      lastChildren: Seq[Boolean],
+      lastChildren: java.util.ArrayList[Boolean],
       append: String => Unit,
       verbose: Boolean,
       prefix: String = "",
@@ -891,7 +884,7 @@ case class CollapseCodegenStages(
 
   private def supportCodegen(plan: SparkPlan): Boolean = plan match {
     case plan: CodegenSupport if plan.supportCodegen =>
-      val willFallback = plan.expressions.exists(_.find(e => !supportCodegen(e)).isDefined)
+      val willFallback = plan.expressions.exists(_.exists(e => !supportCodegen(e)))
       // the generated code will be huge if there are too many columns
       val hasTooManyOutputFields =
         WholeStageCodegenExec.isTooManyFields(conf, plan.schema)

@@ -259,7 +259,7 @@ trait GroupState[S] extends LogicalGroupState[S] {
   @throws[IllegalArgumentException](
     "if 'timestampMs' is not positive or less than the current watermark in a streaming query")
   @throws[UnsupportedOperationException](
-    "if processing time timeout has not been enabled in [map|flatMap]GroupsWithState")
+    "if event time timeout has not been enabled in [map|flatMap]GroupsWithState")
   def setTimeoutTimestamp(timestampMs: Long): Unit
 
 
@@ -315,6 +315,11 @@ trait GroupState[S] extends LogicalGroupState[S] {
    *
    * @note In a streaming query, this can be called only when watermark is set before calling
    *       `[map/flatMap]GroupsWithState`. In a batch query, this method always returns -1.
+   * @note The watermark gets propagated in the end of each query. As a result, this method will
+   *       return 0 (1970-01-01T00:00:00) for the first micro-batch. If you use this value
+   *       as a part of the timestamp set in the `setTimeoutTimestamp`, it may lead to the
+   *       state expiring immediately in the next micro-batch, once the watermark gets the
+   *       real value from your data.
    */
   @throws[UnsupportedOperationException](
     "if watermark has not been set before in [map|flatMap]GroupsWithState")

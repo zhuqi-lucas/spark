@@ -17,7 +17,6 @@
 
 package org.apache.spark.deploy.history
 
-import java.util.NoSuchElementException
 import java.util.concurrent.ExecutionException
 import javax.servlet.{DispatcherType, Filter, FilterChain, FilterConfig, ServletException, ServletRequest, ServletResponse}
 import javax.servlet.http.{HttpServletRequest, HttpServletResponse}
@@ -395,7 +394,6 @@ private[history] class ApplicationCacheCheckFilter(
     val httpRequest = request.asInstanceOf[HttpServletRequest]
     val httpResponse = response.asInstanceOf[HttpServletResponse]
     val requestURI = httpRequest.getRequestURI
-    val operation = httpRequest.getMethod
 
     // if the request is for an attempt, check to see if it is in need of delete/refresh
     // and have the cache update the UI if so

@@ -25,7 +25,7 @@ import scala.concurrent.Future
 import org.apache.spark.executor.ExecutorMetrics
 import org.apache.spark.internal.{config, Logging}
 import org.apache.spark.internal.config.Network
-import org.apache.spark.rpc.{RpcCallContext, RpcEnv, ThreadSafeRpcEndpoint}
+import org.apache.spark.rpc.{IsolatedThreadSafeRpcEndpoint, RpcCallContext, RpcEnv}
 import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.cluster.CoarseGrainedClusterMessages.RemoveExecutor
 import org.apache.spark.scheduler.cluster.CoarseGrainedSchedulerBackend
@@ -65,7 +65,7 @@ private[spark] case class HeartbeatResponse(reregisterBlockManager: Boolean)
  * Lives in the driver to receive heartbeats from executors..
  */
 private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
-  extends SparkListener with ThreadSafeRpcEndpoint with Logging {
+  extends SparkListener with IsolatedThreadSafeRpcEndpoint with Logging {
 
   def this(sc: SparkContext) = {
     this(sc, new SystemClock)
@@ -80,7 +80,9 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
   // executor ID -> timestamp of when the last heartbeat from this executor was received
   private val executorLastSeen = new HashMap[String, Long]
 
-  private val executorTimeoutMs = Utils.executorTimeoutMs(sc.conf)
+  private val executorTimeoutMs = sc.conf.get(
+    config.STORAGE_BLOCKMANAGER_HEARTBEAT_TIMEOUT
+  ).getOrElse(Utils.timeStringAsMs(s"${sc.conf.get(Network.NETWORK_TIMEOUT)}s"))
 
   private val checkTimeoutIntervalMs = sc.conf.get(Network.NETWORK_TIMEOUT_INTERVAL)
 

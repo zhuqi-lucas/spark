@@ -47,7 +47,8 @@ trait CodegenInterpretedPlanTest extends PlanTest {
     super.test(testName + " (codegen path)", testTags: _*)(
       withSQLConf(SQLConf.CODEGEN_FACTORY_MODE.key -> codegenMode) { testFun })(pos)
     super.test(testName + " (interpreted path)", testTags: _*)(
-      withSQLConf(SQLConf.CODEGEN_FACTORY_MODE.key -> interpretedMode) { testFun })(pos)
+      withSQLConf(SQLConf.CODEGEN_FACTORY_MODE.key -> interpretedMode) {
+        withSQLConf(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key -> "false") { testFun }})(pos)
   }
 
   protected def testFallback(
@@ -76,9 +77,9 @@ trait PlanTestBase extends PredicateHelper with SQLHelper with SQLConfHelper { s
       case s: LateralSubquery =>
         s.copy(plan = normalizeExprIds(s.plan), exprId = ExprId(0))
       case e: Exists =>
-        e.copy(exprId = ExprId(0))
+        e.copy(plan = normalizeExprIds(e.plan), exprId = ExprId(0))
       case l: ListQuery =>
-        l.copy(exprId = ExprId(0))
+        l.copy(plan = normalizeExprIds(l.plan), exprId = ExprId(0))
       case a: AttributeReference =>
         AttributeReference(a.name, a.dataType, a.nullable)(exprId = ExprId(0))
       case OuterReference(a: AttributeReference) =>
@@ -93,6 +94,10 @@ trait PlanTestBase extends PredicateHelper with SQLHelper with SQLConfHelper { s
         lv.copy(exprId = ExprId(0), value = null)
       case udf: PythonUDF =>
         udf.copy(resultId = ExprId(0))
+      case udaf: PythonUDAF =>
+        udaf.copy(resultId = ExprId(0))
+      case a: FunctionTableSubqueryArgumentExpression =>
+        a.copy(plan = normalizeExprIds(a.plan), exprId = ExprId(0))
     }
   }
 
@@ -137,6 +142,7 @@ trait PlanTestBase extends PredicateHelper with SQLHelper with SQLConfHelper { s
           }
         }.asInstanceOf[Seq[NamedExpression]]
         Project(projList, child)
+      case c: KeepAnalyzedQuery => c.storeAnalyzedQuery()
     }
   }
 

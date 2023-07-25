@@ -24,17 +24,18 @@ import java.util.TimeZone
 
 import scala.reflect.runtime.universe.TypeTag
 
-import org.apache.spark.SparkFunSuite
+import org.apache.spark.{SparkException, SparkFunSuite}
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.catalyst.{CatalystTypeConverters, ScalaReflection}
 import org.apache.spark.sql.catalyst.encoders.ExamplePointUDT
 import org.apache.spark.sql.catalyst.util.DateTimeConstants._
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
+import org.apache.spark.sql.catalyst.util.TypeUtils.toSQLType
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.types.DayTimeIntervalType._
 import org.apache.spark.sql.types.YearMonthIntervalType._
-import org.apache.spark.unsafe.types.CalendarInterval
+import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String}
 
 class LiteralExpressionSuite extends SparkFunSuite with ExpressionEvalHelper {
 
@@ -88,6 +89,17 @@ class LiteralExpressionSuite extends SparkFunSuite with ExpressionEvalHelper {
     checkEvaluation(Literal.default(StructType(StructField("a", StringType) :: Nil)), Row(""))
     // ExamplePointUDT.sqlType is ArrayType(DoubleType, false).
     checkEvaluation(Literal.default(new ExamplePointUDT), Array())
+
+    // DateType without default value`
+    List(CharType(1), VarcharType(1)).foreach(errType => {
+      checkError(
+        exception = intercept[SparkException] {
+          Literal.default(errType)
+        },
+        errorClass = "INTERNAL_ERROR",
+        parameters = Map("message" -> s"No default value for type: ${toSQLType(errType)}.")
+      )
+    })
   }
 
   test("boolean literals") {
@@ -231,17 +243,6 @@ class LiteralExpressionSuite extends SparkFunSuite with ExpressionEvalHelper {
     checkStructLiteral((Period.ZERO, ("abc", Duration.ofDays(1))))
   }
 
-  test("unsupported types (map and struct) in Literal.apply") {
-    def checkUnsupportedTypeInLiteral(v: Any): Unit = {
-      val errMsgMap = intercept[RuntimeException] {
-        Literal(v)
-      }
-      assert(errMsgMap.getMessage.startsWith("Unsupported literal type"))
-    }
-    checkUnsupportedTypeInLiteral(Map("key1" -> 1, "key2" -> 2))
-    checkUnsupportedTypeInLiteral(("mike", 29, 1.0))
-  }
-
   test("SPARK-24571: char literals") {
     checkEvaluation(Literal('X'), "X")
     checkEvaluation(Literal.create('0'), "0")
@@ -256,6 +257,10 @@ class LiteralExpressionSuite extends SparkFunSuite with ExpressionEvalHelper {
     checkEvaluation(Literal(Array('测','试')), "测试")
     checkEvaluation(Literal(Array('a', '测', 'b', '试', 'c')), "a测b试c")
     // scalastyle:on
+  }
+
+  test("SPARK-39052: Support Char in Literal.create") {
+    checkEvaluation(Literal.create('a', StringType), "a")
   }
 
   test("construct literals from java.time.LocalDate") {
@@ -464,5 +469,11 @@ class LiteralExpressionSuite extends SparkFunSuite with ExpressionEvalHelper {
       }
       checkEvaluation(Literal.create(duration, dt), result)
     }
+  }
+
+  test("SPARK-37967: Literal.create support ObjectType") {
+    checkEvaluation(
+      Literal.create(UTF8String.fromString("Spark SQL"), ObjectType(classOf[UTF8String])),
+      UTF8String.fromString("Spark SQL"))
   }
 }
